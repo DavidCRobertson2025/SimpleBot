@@ -826,7 +826,7 @@ def main():
     if epd is not None:
         try:
             if armed:
-                draw_text_on_epd(epd, "Listening...")
+                draw_centered_message(epd, "Listening...")
             else:
                 draw_text_on_epd(epd, "Push the button to ask me a question.")
         except Exception as e:
@@ -843,7 +843,7 @@ def main():
                 update_led(armed)
                 if epd is not None:
                     if armed:
-                        draw_text_on_epd(epd, "Listening...")
+                        draw_centered_message(epd, "Listening...")
                     else:
                         draw_text_on_epd(epd, "Push the button to ask me a question.")
                 state_str = "ACTIVE (listening)" if armed else "SLEEPING"
@@ -914,6 +914,8 @@ def main():
 
             print("\n--- Ready for the next phrase ---\n")
             time.sleep(2.0)
+            
+            draw_centered_message(epd, "Listening...")
 
     except KeyboardInterrupt:
         print("\n👋 Exiting SimpleBot...")
