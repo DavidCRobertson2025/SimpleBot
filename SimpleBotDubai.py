@@ -304,6 +304,36 @@ def transcribe_audio(filename: str) -> str:
 # ---------------------------------------------------------
 # TTS + Playback
 # ---------------------------------------------------------
+
+def ensure_volume(target_percent=75):
+    """
+    Ensures the USB speaker volume is set to the given percentage.
+    Tries PCM first, then Master if PCM is not available.
+    """
+    try:
+        # Try setting PCM
+        subprocess.run(
+            ["amixer", "-c", "2", "sset", "PCM", f"{target_percent}%"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    try:
+        # Try Master if PCM doesn't exist
+        subprocess.run(
+            ["amixer", "-c", "2", "sset", "Master", f"{target_percent}%"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    print(f"🔊 Ensured speaker volume = {target_percent}%")
+
+
+
 def speak_text(text: str):
     """Use OpenAI TTS to speak the text through the speaker."""
     if not text:
@@ -311,6 +341,9 @@ def speak_text(text: str):
 
     mp3_path = "tts_output.mp3"
     wav_path = "tts_output.wav"
+
+    # Make sure volume is loud enough
+    ensure_volume(75)
 
     print("🔊 Generating speech...")
     try:
@@ -433,7 +466,7 @@ def draw_text_on_epd(epd, text: str):
     # Font
     try:
         font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14
         )
     except Exception:
         font = ImageFont.load_default()
