@@ -434,6 +434,79 @@ def speak_text(text: str):
 
 
 # ---------------------------------------------------------
+# WiFi connectivity utilities
+# ---------------------------------------------------------
+def check_wifi_connected() -> bool:
+    """
+    Check if WiFi is connected by:
+    1. Checking if wlan0 interface has an IP address
+    2. Trying to ping a reliable server (8.8.8.8)
+    Returns True if connected, False otherwise.
+    """
+    try:
+        # Method 1: Check if wlan0 has an IP address
+        result = subprocess.run(
+            ["ip", "addr", "show", "wlan0"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if "inet " in result.stdout:
+            # Has IP, now verify connectivity with ping
+            ping_result = subprocess.run(
+                ["ping", "-c", "1", "-W", "2", "8.8.8.8"],
+                capture_output=True,
+                timeout=3
+            )
+            return ping_result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        print(f"⚠️ WiFi check error: {e}")
+    
+    return False
+
+
+def try_connect_wifi():
+    """
+    Attempt to connect to WiFi using available methods.
+    Tries nmcli first, then wpa_cli if available.
+    """
+    print("📡 Attempting to connect to WiFi...")
+    
+    # Method 1: Try nmcli (NetworkManager)
+    try:
+        result = subprocess.run(
+            ["nmcli", "radio", "wifi", "on"],
+            capture_output=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            # Try to reconnect
+            subprocess.run(
+                ["nmcli", "device", "wifi", "rescan"],
+                capture_output=True,
+                timeout=5
+            )
+            time.sleep(2)
+            return check_wifi_connected()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    
+    # Method 2: Try wpa_cli (wpa_supplicant)
+    try:
+        result = subprocess.run(
+            ["wpa_cli", "-i", "wlan0", "reconnect"],
+            capture_output=True,
+            timeout=5
+        )
+        time.sleep(3)
+        return check_wifi_connected()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    
+    return False
+
+
+# ---------------------------------------------------------
 # E-Paper display utilities
 # ---------------------------------------------------------
 def init_epd():
@@ -673,20 +746,91 @@ def call_chatgpt(user_text: str) -> tuple[str, str]:
 # ---------------------------------------------------------
 def main():
     epd = None
+    
+    # Step 1: Initialize e-Paper and show "starting"
     try:
         epd = init_epd()
+        if epd is not None:
+            draw_centered_message(epd, "Starting...")
+            print("📺 Display: Starting...")
+            time.sleep(1)
     except Exception as e:
         print(f"⚠️ Failed to init e-Paper: {e}")
         epd = None
-
+    
+    # Step 2: Check WiFi connectivity
+    if epd is not None:
+        try:
+            draw_centered_message(epd, "Checking WiFi\nconnectivity...")
+            print("📺 Display: Checking WiFi connectivity...")
+        except Exception as e:
+            print(f"⚠️ Error updating display: {e}")
+    
+    print("📡 Checking WiFi connectivity...")
+    wifi_connected = check_wifi_connected()
+    
+    if wifi_connected:
+        if epd is not None:
+            try:
+                draw_centered_message(epd, "WIFI Connected")
+                print("📺 Display: WIFI Connected")
+            except Exception as e:
+                print(f"⚠️ Error updating display: {e}")
+        print("✅ WiFi is connected")
+        time.sleep(1.5)
+    else:
+        if epd is not None:
+            try:
+                draw_centered_message(epd, "WiFi not connected.\n\nTrying to connect...")
+                print("📺 Display: WiFi not connected. Trying to connect...")
+            except Exception as e:
+                print(f"⚠️ Error updating display: {e}")
+        print("⚠️ WiFi is not connected. Attempting to connect...")
+        
+        # Try to connect
+        wifi_connected = try_connect_wifi()
+        
+        if wifi_connected:
+            if epd is not None:
+                try:
+                    draw_centered_message(epd, "WIFI Connected")
+                    print("📺 Display: WIFI Connected")
+                except Exception as e:
+                    print(f"⚠️ Error updating display: {e}")
+            print("✅ WiFi connected successfully")
+            time.sleep(1.5)
+        else:
+            if epd is not None:
+                try:
+                    draw_centered_message(epd, "WiFi not connected.\n\nContinuing anyway...")
+                    print("📺 Display: WiFi not connected. Continuing anyway...")
+                except Exception as e:
+                    print(f"⚠️ Error updating display: {e}")
+            print("⚠️ Could not connect to WiFi. Continuing anyway...")
+            time.sleep(2)
+    
+    # Step 3: Initialize agent
+    if epd is not None:
+        try:
+            draw_centered_message(epd, "Initializing agent...")
+            print("📺 Display: Initializing agent...")
+        except Exception as e:
+            print(f"⚠️ Error updating display: {e}")
+    print("🤖 Initializing agent...")
+    time.sleep(1)
+    
+    # Step 4: Ready state
     armed = is_button_on()
     update_led(armed)
 
     if epd is not None:
-        if armed:
-            draw_text_on_epd(epd, "Ready.\n\nAsk me a question.")
-        else:
-            draw_text_on_epd(epd, "Sleeping.\n\nPush the button if you need help")
+        try:
+            if armed:
+                draw_text_on_epd(epd, "Ready.\n\nAsk me a question.")
+            else:
+                draw_text_on_epd(epd, "Sleeping.\n\nPush the button if you need help")
+        except Exception as e:
+            print(f"⚠️ Error updating display: {e}")
 
     print("✅ SimpleBot coach is running. Ctrl+C to exit.\n")
 
