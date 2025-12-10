@@ -1,0 +1,23 @@
+[Unit]
+Description=SimpleBot E-Ink Workshop Coach
+After=network-online.target sound.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=davidcr
+WorkingDirectory=/home/davidcr/SimpleBot
+
+# Make sure we see logs in journalctl
+StandardOutput=journal
+StandardError=journal
+
+# Run the bot via the wrapper script
+ExecStart=/home/davidcr/SimpleBot/run_simplebot.sh
+
+# Restart if it crashes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

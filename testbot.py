@@ -30,8 +30,8 @@ Hardware:
 import os
 import time
 import wave
-import audioop
 import subprocess
+import numpy as np
 
 import pyaudio
 from dotenv import load_dotenv
@@ -90,12 +90,20 @@ def update_led(armed: bool):
 # ---------------------------------------------------------
 def find_audio_devices():
     """
-    Find reasonable input/output devices.
-    Returns (input_index, output_index).
+    Hard-code the correct USB devices:
+
+    - input_index = 3  (KT USB Audio mic)
+    - output_index = 1 (UACDemoV1.0 USB speaker)
     """
-    p = pyaudio.PyAudio()
-    input_index = None
-    output_index = None
+
+    input_index = 2
+    output_index = 1
+
+    print("=== Using fixed audio devices ===")
+    print(f"🎤 Mic input device index = {input_index}")
+    print(f"🔊 Speaker output device index = {output_index}")
+
+    return input_index, output_index
 
     for i in range(p.get_device_count()):
         info = p.get_device_info_by_index(i)
@@ -132,9 +140,9 @@ def find_audio_devices():
 
 def record_audio(
     filename="input.wav",
-    threshold=2400,
-    silence_duration=0.6,
-    max_duration=15.0,
+    threshold=5500,
+    silence_duration=0.3,
+    max_duration=7.0,
 ):
     """
     Voice-activated recording:
@@ -146,7 +154,6 @@ def record_audio(
     Returns filename or None if nothing captured.
     """
     p = pyaudio.PyAudio()
-    RATE = 44100
     CHUNK = 1024
 
     input_index, _ = find_audio_devices()
@@ -156,14 +163,50 @@ def record_audio(
         return None
 
     print(f"🎤 Using input device index {input_index}")
-    stream = p.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=RATE,
-        input=True,
-        frames_per_buffer=CHUNK,
-        input_device_index=input_index,
-    )
+
+    # Try a few common sample rates until one works
+    candidate_rates = []
+
+    # First, try the device's default sample rate if available
+    try:
+        dev_info = p.get_device_info_by_index(input_index)
+        default_rate = int(dev_info.get("defaultSampleRate", 44100))
+        candidate_rates.append(default_rate)
+    except Exception:
+        pass
+
+    # Add some typical USB mic rates
+    for r in (44100, 48000, 16000):
+        if r not in candidate_rates:
+            candidate_rates.append(r)
+
+    stream = None
+    RATE = None
+    tried = []
+
+    for rate in candidate_rates:
+        try:
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=rate,
+                input=True,
+                frames_per_buffer=CHUNK,
+                input_device_index=input_index,
+            )
+            RATE = rate
+            print(f"✅ Opened microphone at {RATE} Hz")
+            break
+        except OSError as e:
+            tried.append((rate, str(e)))
+            continue
+
+    if stream is None or RATE is None:
+        print("❌ Could not open microphone at any sample rate. Tried:")
+        for r, err in tried:
+            print(f"   - {r} Hz → {err}")
+        p.terminate()
+        return None
 
     print("👂 Waiting for speech...")
     frames = []
@@ -184,7 +227,13 @@ def record_audio(
                 break
 
             data = stream.read(CHUNK, exception_on_overflow=False)
-            rms = audioop.rms(data, 2)
+
+            # Convert bytes to numpy array of int16 and compute RMS
+            samples = np.frombuffer(data, dtype=np.int16)
+            if samples.size == 0:
+                continue
+
+            rms = np.sqrt(np.mean(samples.astype(np.float32) ** 2))
 
             if not recording_started:
                 # Wait for voice above threshold
@@ -226,6 +275,7 @@ def record_audio(
         wf.writeframes(b"".join(frames))
 
     return filename
+
 
 
 def transcribe_audio(filename: str) -> str:
@@ -349,15 +399,23 @@ def init_epd():
 
 def draw_text_on_epd(epd, text: str):
     """
-    Clear the screen and draw wrapped text on the 250x122 display.
+    Draw wrapped text in *landscape* orientation, regardless of the panel's
+    native (width, height). We create a landscape canvas and rotate only if
+    the panel is physically in portrait mode.
     """
     if not text:
         text = "(no text)"
 
-    H = epd.height    # 122
-    W = epd.width     # 250
+    # Physical panel dimensions reported by the driver
+    panel_w = epd.width
+    panel_h = epd.height
 
-    image = Image.new("1", (W, H), 255)  # 255 = white
+    # We want to draw in landscape: width = longer side, height = shorter side
+    logical_w = max(panel_w, panel_h)
+    logical_h = min(panel_w, panel_h)
+
+    # Create a 1-bit (black/white) landscape image
+    image = Image.new("1", (logical_w, logical_h), 255)  # 255 = white
     draw = ImageDraw.Draw(image)
 
     # Choose a font
@@ -391,7 +449,7 @@ def draw_text_on_epd(epd, text: str):
             lines.append(line)
         return lines
 
-    max_width = W - 4   # small margin
+    max_width = logical_w - 4   # small margin
     lines = wrap_text(text, max_width)
 
     # Compute line height
@@ -404,13 +462,25 @@ def draw_text_on_epd(epd, text: str):
 
     y = 0
     for line in lines:
-        if y + line_height > H:
+        if y + line_height > logical_h:
             break
         draw.text((2, y), line, font=font, fill=0)  # 0 = black
         y += line_height
 
-    print("📜 Updating e-Paper display...")
-    epd.display(epd.getbuffer(image))
+    # Now map our landscape canvas onto the physical panel.
+    # If the panel is "portrait" (height > width), rotate the image so it fits.
+    print("📜 Updating e-Paper display (landscape aware)...")
+
+    if panel_w < panel_h:
+        # Panel is taller than wide → rotate our landscape image
+        rotated = image.rotate(-90, expand=True)
+        # If this is still the wrong way around, change 90 to -90
+    else:
+        # Panel is already landscape
+        rotated = image
+
+    epd.display(epd.getbuffer(rotated))
+
 
 # ---------------------------------------------------------
 # Main loop
@@ -429,7 +499,7 @@ def main():
 
     if epd is not None:
         if armed:
-            draw_text_on_epd(epd, "Ready.\nSpeak after the beep.")
+            draw_text_on_epd(epd, "Ready.\nAsk me a question.")
         else:
             draw_text_on_epd(epd, "Sleeping.\nFlip the switch to wake me.")
 
@@ -445,7 +515,7 @@ def main():
                 update_led(armed)
                 if epd is not None:
                     if armed:
-                        draw_text_on_epd(epd, "Ready.\nSpeak after the beep.")
+                        draw_text_on_epd(epd, "Ready.\nAsk me a question.")
                     else:
                         draw_text_on_epd(epd, "Sleeping.\nFlip the switch to wake me.")
                 state_str = "ACTIVE (listening)" if armed else "SLEEPING"
