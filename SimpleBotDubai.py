@@ -343,7 +343,7 @@ def speak_text(text: str):
     wav_path = "tts_output.wav"
 
     # Make sure volume is loud enough
-    ensure_volume(75)
+    ensure_volume(20)
 
     print("🔊 Generating speech...")
     try:
@@ -826,9 +826,9 @@ def main():
     if epd is not None:
         try:
             if armed:
-                draw_text_on_epd(epd, "Ready.\n\nAsk me a question.")
+                draw_text_on_epd(epd, "Listening...")
             else:
-                draw_text_on_epd(epd, "Sleeping.\n\nPush the button if you need help")
+                draw_text_on_epd(epd, "Push the button to ask me a question.")
         except Exception as e:
             print(f"⚠️ Error updating display: {e}")
 
@@ -843,9 +843,9 @@ def main():
                 update_led(armed)
                 if epd is not None:
                     if armed:
-                        draw_text_on_epd(epd, "Ready.\n\nAsk me a question")
+                        draw_text_on_epd(epd, "Listening...")
                     else:
-                        draw_text_on_epd(epd, "Sleeping.\n\nPush the button if you need help")
+                        draw_text_on_epd(epd, "Push the button to ask me a question.")
                 state_str = "ACTIVE (listening)" if armed else "SLEEPING"
                 print(f"🔁 Button state changed → {state_str}")
                 last_armed = armed
