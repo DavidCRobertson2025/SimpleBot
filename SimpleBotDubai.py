@@ -58,7 +58,7 @@ ASSISTANT_IDS = {
     2: "asst_W8bU0mQMLeANzSY58wMh2akb",
     3: "asst_7RaXLSYWXNIYE2cFjgdkE67O",
     4: "asst_kzQx2UVBF2saxY6aByenwylg",
-    5: "",
+    5: "asst_buWfn5WgUpzNoPLuZ4kizzxk",
 }
 
 STT_MODEL = "whisper-1"
