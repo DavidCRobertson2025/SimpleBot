@@ -45,11 +45,15 @@ import digitalio
 # ---------------------------------------------------------
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 
 STT_MODEL = "whisper-1"
 CHAT_MODEL = "gpt-4.1-mini"
 TTS_MODEL = "gpt-4o-mini-tts"
 TTS_VOICE = "echo"
+
+# Thread ID for Assistant API (persists until program restarts)
+assistant_thread_id = None
 
 # ---------------------------------------------------------
 # Audio device configuration (based on your current listing)
@@ -751,6 +755,145 @@ def call_chatgpt(user_text: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------
+# Assistant API coach logic
+# ---------------------------------------------------------
+def call_assistant(user_text: str) -> tuple[str, str]:
+    """
+    Send the user's question to OpenAI Assistant API and return (spoken_bilingual, screen_arabic).
+    
+    Uses a persistent thread that stays alive until the program restarts.
+    The assistant should be configured with the same system instructions as call_chatgpt.
+    
+    Returns the same format as call_chatgpt:
+      - spoken_bilingual: English + Arabic text to speak
+      - screen_ar: Short Arabic text for e-ink display
+    """
+    global assistant_thread_id
+    
+    if not ASSISTANT_ID:
+        print("❌ ASSISTANT_ID not found in environment variables.")
+        return "", ""
+    
+    try:
+        # Create thread if it doesn't exist
+        if assistant_thread_id is None:
+            print("🧵 Creating new Assistant thread...")
+            thread = client.beta.threads.create()
+            assistant_thread_id = thread.id
+            print(f"✅ Thread created: {assistant_thread_id}")
+        else:
+            print(f"🧵 Using existing thread: {assistant_thread_id}")
+        
+        # Add user message to thread
+        print("📝 Adding message to thread...")
+        client.beta.threads.messages.create(
+            thread_id=assistant_thread_id,
+            role="user",
+            content=user_text
+        )
+        
+        # Create and run the assistant
+        print("🤖 Running assistant...")
+        run = client.beta.threads.runs.create(
+            thread_id=assistant_thread_id,
+            assistant_id=ASSISTANT_ID
+        )
+        
+        # Wait for the run to complete
+        print("⏳ Waiting for assistant response...")
+        while True:
+            run_status = client.beta.threads.runs.retrieve(
+                thread_id=assistant_thread_id,
+                run_id=run.id
+            )
+            
+            if run_status.status == "completed":
+                break
+            elif run_status.status in ["failed", "cancelled", "expired"]:
+                print(f"❌ Assistant run {run_status.status}: {getattr(run_status, 'last_error', 'Unknown error')}")
+                return "", ""
+            elif run_status.status == "requires_action":
+                print("⚠️ Assistant requires action (function calling) - not supported in this implementation.")
+                return "", ""
+            
+            time.sleep(0.5)  # Poll every 500ms
+        
+        # Retrieve the assistant's response
+        print("📥 Retrieving assistant response...")
+        messages = client.beta.threads.messages.list(
+            thread_id=assistant_thread_id,
+            limit=1
+        )
+        
+        if not messages.data or len(messages.data) == 0:
+            print("⚠️ No response from assistant.")
+            return "", ""
+        
+        # Get the latest message content
+        latest_message = messages.data[0]
+        if latest_message.role != "assistant":
+            print("⚠️ Latest message is not from assistant.")
+            return "", ""
+        
+        # Extract text content from message
+        full = ""
+        for content in latest_message.content:
+            if content.type == "text":
+                full = content.text.value
+                break
+        
+        if not full:
+            print("⚠️ No text content in assistant response.")
+            return "", ""
+        
+        full = full.strip()
+        
+        # Parse the response using the same logic as call_chatgpt
+        # Split off the [screen] section first
+        spoken_block = full
+        screen_block = ""
+        screen_marker = "[screen]"
+        if screen_marker in full:
+            before, after = full.split(screen_marker, 1)
+            spoken_block = before.strip()
+            screen_block = after.strip()
+        
+        # Within the spoken block, split English vs Arabic spoken parts
+        en_spoken = spoken_block
+        ar_spoken = ""
+        ar_marker = "[ar_spoken]"
+        if ar_marker in spoken_block:
+            before, after = spoken_block.split(ar_marker, 1)
+            en_spoken = before.strip()
+            ar_spoken = after.strip()
+        
+        # Build bilingual spoken answer: English followed by Arabic
+        spoken_bilingual = (en_spoken + "\n" + ar_spoken).strip()
+        
+        # Screen text: Arabic-only block after [screen]
+        screen_ar = screen_block.strip()
+        
+        # Safety fallbacks if the model didn't quite follow format
+        if not screen_ar:
+            # Prefer Arabic spoken as screen text if available
+            screen_ar = ar_spoken or en_spoken
+        
+        # Ensure screen text is not too long
+        words = screen_ar.split()
+        if len(words) > 40:
+            screen_ar = " ".join(words[:40])
+        
+        return spoken_bilingual, screen_ar
+        
+    except APIConnectionError:
+        print("❌ Cannot reach OpenAI for Assistant API.")
+        return "", ""
+    except Exception as e:
+        print(f"⚠️ Assistant API error: {e}")
+        return "", ""
+
+
+# ---------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------
 def main():
@@ -920,9 +1063,9 @@ def main():
                 except Exception as e:
                     print(f"⚠️ Error drawing thinking message: {e}")
 
-            # Send to ChatGPT coach
-            print("🤔 Asking ChatGPT coach...")
-            spoken_answer, screen_summary = call_chatgpt(text)
+            # Send to Assistant API coach
+            print("🤔 Asking Assistant coach...")
+            spoken_answer, screen_summary = call_assistant(text)
 
             if not spoken_answer and not screen_summary:
                 print("⚠️ No response from ChatGPT, skipping.\n")
