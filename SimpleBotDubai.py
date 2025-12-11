@@ -22,9 +22,11 @@ Assumes:
 """
 
 import os
+import sys
 import time
 import wave
 import subprocess
+import argparse
 
 import numpy as np
 import pyaudio
@@ -45,7 +47,8 @@ import digitalio
 # ---------------------------------------------------------
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+# ASSISTANT_ID will be set from command-line argument or environment variable
+ASSISTANT_ID = None
 
 STT_MODEL = "whisper-1"
 CHAT_MODEL = "gpt-4.1-mini"
@@ -858,7 +861,7 @@ def call_assistant(user_text: str) -> tuple[str, str]:
     global assistant_thread_id
     
     if not ASSISTANT_ID:
-        print("❌ ASSISTANT_ID not found in environment variables.")
+        print("❌ ASSISTANT_ID not found. Please provide it as a command-line argument (--assistant-id) or set ASSISTANT_ID environment variable.")
         return "", ""
     
     try:
@@ -1276,4 +1279,35 @@ def main():
 
 
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="SimpleBot Dubai - Workshop Innovation Coach",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python SimpleBotDubai.py
+  python SimpleBotDubai.py --assistant-id asst_xxxxxxxxxxxxx
+  python SimpleBotDubai.py -a asst_xxxxxxxxxxxxx
+        """
+    )
+    parser.add_argument(
+        "--assistant-id", "-a",
+        type=str,
+        default=None,
+        help="OpenAI Assistant ID (overrides ASSISTANT_ID environment variable)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Set ASSISTANT_ID from command-line argument or environment variable
+    if args.assistant_id:
+        ASSISTANT_ID = args.assistant_id
+        print(f"✅ Using Assistant ID from command-line: {ASSISTANT_ID}")
+    else:
+        ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+        if ASSISTANT_ID:
+            print(f"✅ Using Assistant ID from environment variable: {ASSISTANT_ID}")
+        else:
+            print("⚠️  No Assistant ID provided. Please use --assistant-id or set ASSISTANT_ID environment variable.")
+    
     main()
