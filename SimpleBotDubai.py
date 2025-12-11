@@ -438,29 +438,38 @@ def speak_text(text: str):
 # ---------------------------------------------------------
 def check_wifi_connected() -> bool:
     """
-    Check if WiFi is connected by:
-    1. Checking if wlan0 interface has an IP address
-    2. Trying to ping a reliable server (8.8.8.8)
-    Returns True if connected, False otherwise.
+    Check if WiFi interface (wlan0) has an IP address.
+    Returns True if WiFi interface is connected, False otherwise.
+    This does NOT check internet connectivity.
     """
     try:
-        # Method 1: Check if wlan0 has an IP address
         result = subprocess.run(
             ["ip", "addr", "show", "wlan0"],
             capture_output=True,
             text=True,
             timeout=2
         )
-        if "inet " in result.stdout:
-            # Has IP, now verify connectivity with ping
-            ping_result = subprocess.run(
-                ["ping", "-c", "1", "-W", "2", "8.8.8.8"],
-                capture_output=True,
-                timeout=3
-            )
-            return ping_result.returncode == 0
+        return "inet " in result.stdout
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
         print(f"⚠️ WiFi check error: {e}")
+    
+    return False
+
+
+def check_internet_connected() -> bool:
+    """
+    Check if internet connectivity is available by pinging a reliable server.
+    Returns True if internet is reachable, False otherwise.
+    """
+    try:
+        ping_result = subprocess.run(
+            ["ping", "-c", "1", "-W", "2", "8.8.8.8"],
+            capture_output=True,
+            timeout=3
+        )
+        return ping_result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        print(f"⚠️ Internet check error: {e}")
     
     return False
 
@@ -761,8 +770,8 @@ def main():
     # Step 2: Check WiFi connectivity
     if epd is not None:
         try:
-            draw_centered_message(epd, "Checking WiFi\nconnectivity...")
-            print("📺 Display: Checking WiFi connectivity...")
+            draw_centered_message(epd, "Checking WiFi...")
+            print("📺 Display: Checking WiFi...")
         except Exception as e:
             print(f"⚠️ Error updating display: {e}")
     
@@ -772,8 +781,8 @@ def main():
     if wifi_connected:
         if epd is not None:
             try:
-                draw_centered_message(epd, "WIFI Connected")
-                print("📺 Display: WIFI Connected")
+                draw_centered_message(epd, "WiFi Connected")
+                print("📺 Display: WiFi Connected")
             except Exception as e:
                 print(f"⚠️ Error updating display: {e}")
         print("✅ WiFi is connected")
@@ -790,26 +799,47 @@ def main():
         # Try to connect
         wifi_connected = try_connect_wifi()
         
-        if wifi_connected:
+        if not wifi_connected:
             if epd is not None:
                 try:
-                    draw_centered_message(epd, "WIFI Connected")
-                    print("📺 Display: WIFI Connected")
+                    draw_centered_message(epd, "WiFi not connected.\n\nPlease restart.")
+                    print("📺 Display: WiFi not connected. Please restart.")
                 except Exception as e:
                     print(f"⚠️ Error updating display: {e}")
-            print("✅ WiFi connected successfully")
-            time.sleep(1.5)
-        else:
-            if epd is not None:
-                try:
-                    draw_centered_message(epd, "WiFi not connected.\n\nContinuing anyway...")
-                    print("📺 Display: WiFi not connected. Continuing anyway...")
-                except Exception as e:
-                    print(f"⚠️ Error updating display: {e}")
-            print("⚠️ Could not connect to WiFi. Continuing anyway...")
-            time.sleep(2)
+            print("❌ WiFi is not connected. Please restart the device.")
+            return
     
-    # Step 3: Initialize agent
+    # Step 3: Check Internet connectivity
+    if epd is not None:
+        try:
+            draw_centered_message(epd, "Checking Internet...")
+            print("📺 Display: Checking Internet...")
+        except Exception as e:
+            print(f"⚠️ Error updating display: {e}")
+    
+    print("🌐 Checking Internet connectivity...")
+    internet_connected = check_internet_connected()
+    
+    if not internet_connected:
+        if epd is not None:
+            try:
+                draw_centered_message(epd, "Internet not connected.\n\nPlease restart.")
+                print("📺 Display: Internet not connected. Please restart.")
+            except Exception as e:
+                print(f"⚠️ Error updating display: {e}")
+        print("❌ Internet is not connected. Please restart the device.")
+        return
+    
+    if epd is not None:
+        try:
+            draw_centered_message(epd, "Internet Connected")
+            print("📺 Display: Internet Connected")
+        except Exception as e:
+            print(f"⚠️ Error updating display: {e}")
+    print("✅ Internet is connected")
+    time.sleep(1.5)
+    
+    # Step 4: Initialize agent
     if epd is not None:
         try:
             draw_centered_message(epd, "Initializing agent...")
@@ -819,7 +849,7 @@ def main():
     print("🤖 Initializing agent...")
     time.sleep(1)
     
-    # Step 4: Ready state
+    # Step 5: Ready state
     armed = is_button_on()
     update_led(armed)
 
