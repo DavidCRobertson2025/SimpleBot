@@ -55,6 +55,9 @@ TTS_VOICE = "echo"
 # Thread ID for Assistant API (persists until program restarts)
 assistant_thread_id = None
 
+# Flag to interrupt current operation when button is pressed
+interrupt_flag = False
+
 # ---------------------------------------------------------
 # Audio device configuration (based on your current listing)
 # ---------------------------------------------------------
@@ -272,6 +275,89 @@ def record_audio(
     return filename
 
 
+def record_while_button_on(
+    filename="input.wav",
+    max_duration=30.0,
+):
+    """
+    Records audio continuously while the button is ON.
+    Stops recording when button is turned OFF.
+    
+    Args:
+        filename: Output WAV file path
+        max_duration: Maximum recording duration in seconds (safety limit)
+    
+    Returns:
+        filename or None if nothing captured.
+    """
+    p = pyaudio.PyAudio()
+    CHUNK = 1024
+
+    input_index = MIC_DEVICE_INDEX
+
+    try:
+        dev_info = p.get_device_info_by_index(input_index)
+        print(f"🎤 Using input device {input_index}: {dev_info.get('name')!r}")
+    except Exception as e:
+        print(f"❌ Could not get info for input device {input_index}: {e}")
+        p.terminate()
+        return None
+
+    try:
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=AUDIO_RATE,
+            input=True,
+            frames_per_buffer=CHUNK,
+            input_device_index=input_index,
+        )
+        print(f"✅ Opened microphone at {AUDIO_RATE} Hz")
+    except Exception as e:
+        print(f"❌ Could not open mic device {input_index} at {AUDIO_RATE} Hz: {e}")
+        p.terminate()
+        return None
+
+    print("👂 Recording while button is ON...")
+    frames = []
+    start_time = time.time()
+
+    try:
+        while is_button_on():
+            if time.time() - start_time > max_duration:
+                print("⏱️ Max recording duration reached.")
+                break
+            
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            frames.append(data)
+        
+        # Button went OFF, stop recording
+        if frames:
+            print("🛑 Button turned OFF — stopping recording.")
+        else:
+            print("⚠️ No audio captured.")
+    except KeyboardInterrupt:
+        print("\n🛑 Recording interrupted.")
+    except Exception as e:
+        print(f"⚠️ Recording error: {e}")
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
+    if not frames:
+        print("⚠️ No audio captured.")
+        return None
+
+    with wave.open(filename, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+        wf.setframerate(AUDIO_RATE)
+        wf.writeframes(b"".join(frames))
+
+    return filename
+
+
 # ---------------------------------------------------------
 # Transcription (Whisper, English-only)
 # ---------------------------------------------------------
@@ -420,8 +506,9 @@ def speak_text(text: str):
         chunk = 1024
         data = wf.readframes(chunk)
         while data:
-            if not is_button_on():
-                print("🔕 Button OFF — stopping playback early.")
+            # Interrupt playback if button goes ON (user wants to speak)
+            if is_button_on():
+                print("🔕 Button ON — interrupting playback to listen.")
                 break
             stream.write(data)
             data = wf.readframes(chunk)
@@ -1006,89 +1093,170 @@ def main():
             print(f"⚠️ Error updating display: {e}")
 
     print("✅ SimpleBot coach is running. Ctrl+C to exit.\n")
+    print("📌 Press button to start listening, release to process and respond.\n")
 
     try:
         last_armed = armed
+        audio_path = None
+        processing = False
+        
         while True:
             # Poll button
             armed = is_button_on()
+            
+            # Button state changed
             if armed != last_armed:
                 update_led(armed)
-                if epd is not None:
-                    if armed:
-                        draw_centered_message(epd, "Listening...")
-                    else:
-                        draw_text_on_epd(epd, "Push the button to ask me a question.")
-                state_str = "ACTIVE (listening)" if armed else "SLEEPING"
+                state_str = "LISTENING" if armed else "PROCESSING"
                 print(f"🔁 Button state changed → {state_str}")
                 last_armed = armed
-
-            if not armed:
+                
+                # Button just went ON: interrupt anything and start listening
+                if armed:
+                    print("🎤 Button ON — starting to listen (interrupting any current operation)...")
+                    processing = False  # Stop any processing
+                    audio_path = None  # Reset any previous recording
+                    if epd is not None:
+                        try:
+                            draw_centered_message(epd, "Listening...")
+                        except Exception as e:
+                            print(f"⚠️ Error updating display: {e}")
+                    # Start recording immediately
+                    print("\a", end="", flush=True)
+                    audio_path = record_while_button_on()
+                
+                # Button just went OFF: stop recording and process
+                elif not armed and audio_path and not processing:
+                    print("🛑 Button OFF — processing recorded audio...")
+                    processing = True
+                    if epd is not None:
+                        try:
+                            draw_centered_message(epd, "Processing...")
+                        except Exception as e:
+                            print(f"⚠️ Error updating display: {e}")
+                    
+                    # Process what was recorded
+                    text = transcribe_audio(audio_path)
+                    audio_path = None  # Clear after processing
+                    
+                    # Check if button went ON again (user interrupted)
+                    if is_button_on():
+                        print("🛑 Button pressed again — interrupting processing.")
+                        processing = False
+                        continue
+                    
+                    if not text:
+                        print("⚠️ No transcription.\n")
+                        processing = False
+                        if epd is not None:
+                            try:
+                                draw_text_on_epd(epd, "Push the button to ask me a question.")
+                            except Exception as e:
+                                print(f"⚠️ Error updating display: {e}")
+                        continue
+                    
+                    # Filter out non-meaningful junk
+                    if not is_meaningful_text(text):
+                        print(f"⚠️ Transcription looks like noise/junk: {text!r} — ignoring.\n")
+                        processing = False
+                        if epd is not None:
+                            try:
+                                draw_text_on_epd(epd, "Push the button to ask me a question.")
+                            except Exception as e:
+                                print(f"⚠️ Error updating display: {e}")
+                        continue
+                    
+                    # Exit commands 
+                    lower = text.strip().lower()
+                    if lower in {"stop", "exit", "quit"}:
+                        print("🛑 Stop command received — shutting down.")
+                        speak_text("Okay, stopping now.")
+                        break
+                    
+                    # Check if button went ON again (user interrupted)
+                    if is_button_on():
+                        print("🛑 Button pressed again — interrupting processing.")
+                        processing = False
+                        continue
+                    
+                    # Show "Thinking..." on e-ink while we call Assistant
+                    if epd is not None:
+                        try:
+                            draw_centered_message(epd, "Thinking...")
+                        except Exception as e:
+                            print(f"⚠️ Error drawing thinking message: {e}")
+                    
+                    # Send to Assistant API coach
+                    print("🤔 Asking Assistant coach...")
+                    spoken_answer, screen_summary = call_assistant(text)
+                    
+                    # Check again if button went ON (interrupt thinking)
+                    if is_button_on():
+                        print("🛑 Button pressed — interrupting response.")
+                        processing = False
+                        continue
+                    
+                    if not spoken_answer and not screen_summary:
+                        print("⚠️ No response from Assistant, skipping.\n")
+                        processing = False
+                        if epd is not None:
+                            try:
+                                draw_text_on_epd(epd, "Push the button to ask me a question.")
+                            except Exception as e:
+                                print(f"⚠️ Error updating display: {e}")
+                        continue
+                    
+                    print(f"🤖 Spoken: {spoken_answer}")
+                    print(f"📺 Screen: {screen_summary}")
+                    
+                    # Update e-ink screen
+                    if epd is not None:
+                        try:
+                            draw_text_on_epd(epd, screen_summary)
+                        except Exception as e:
+                            print(f"⚠️ Display error: {e}")
+                    
+                    # Check again if button went ON (interrupt before speaking)
+                    if is_button_on():
+                        print("🛑 Button pressed — interrupting before speaking.")
+                        processing = False
+                        continue
+                    
+                    # Speak answer (will be interrupted if button goes ON)
+                    speak_text(spoken_answer)
+                    
+                    # Final check after speaking
+                    if is_button_on():
+                        print("🛑 Button pressed — ready to listen.")
+                        processing = False
+                        continue
+                    
+                    print("\n--- Ready for next question ---\n")
+                    processing = False
+                    if epd is not None:
+                        try:
+                            draw_text_on_epd(epd, "Push the button to ask me a question.")
+                        except Exception as e:
+                            print(f"⚠️ Error updating display: {e}")
+            
+            # If button is ON and we're not recording, start recording
+            elif armed and audio_path is None and not processing:
+                print("🎤 Button ON — starting to listen...")
+                if epd is not None:
+                    try:
+                        draw_centered_message(epd, "Listening...")
+                    except Exception as e:
+                        print(f"⚠️ Error updating display: {e}")
+                print("\a", end="", flush=True)
+                audio_path = record_while_button_on()
+            
+            # If button is OFF and no audio to process, just wait
+            elif not armed and audio_path is None and not processing:
                 time.sleep(0.1)
                 continue
-
-            # ACTIVE mode
-            print("\a", end="", flush=True)
-            print("🎤 Say something...")
-
-            audio_path = record_audio()
-            if audio_path is None:
-                print("⚠️ Nothing recorded, trying again.\n")
-                time.sleep(0.5)
-                continue
-
-            text = transcribe_audio(audio_path)
-            if not text:
-                print("⚠️ No transcription, trying again.\n")
-                time.sleep(0.5)
-                continue
-
-            # Filter out non-meaningful junk
-            if not is_meaningful_text(text):
-                print(f"⚠️ Transcription looks like noise/junk: {text!r} — ignoring.\n")
-                time.sleep(0.5)
-                continue
-
-            # Exit commands 
-            lower = text.strip().lower()
-            if lower in {"stop", "exit", "quit"}:
-                print("🛑 Stop command received — shutting down.")
-                speak_text("Okay, stopping now.")
-                break
-
-            # Show "Thinking..." on e-ink while we call ChatGPT
-            if epd is not None:
-                try:
-                    draw_centered_message(epd, "Thinking...")
-                except Exception as e:
-                    print(f"⚠️ Error drawing thinking message: {e}")
-
-            # Send to Assistant API coach
-            print("🤔 Asking Assistant coach...")
-            spoken_answer, screen_summary = call_assistant(text)
-
-            if not spoken_answer and not screen_summary:
-                print("⚠️ No response from ChatGPT, skipping.\n")
-                time.sleep(0.5)
-                continue
-
-            print(f"🤖 Spoken: {spoken_answer}")
-            print(f"📺 Screen: {screen_summary}")
-
-            # Update e-ink screen
-            if epd is not None:
-                try:
-                    draw_text_on_epd(epd, screen_summary)
-                except Exception as e:
-                    print(f"⚠️ Display error: {e}")
-
-            # Speak answer
-            speak_text(spoken_answer)
-
-            print("\n--- Ready for the next phrase ---\n")
-            time.sleep(2.0)
-            
-            draw_centered_message(epd, "Listening...")
+            else:
+                # Button state hasn't changed, just wait a bit
+                time.sleep(0.1)
 
     except KeyboardInterrupt:
         print("\n👋 Exiting SimpleBot...")
