@@ -49,6 +49,17 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # ASSISTANT_ID will be set from command-line argument or environment variable
 ASSISTANT_ID = None
+# USE_CHAT_MODE flag - if True, use chat completions instead of Assistant API
+USE_CHAT_MODE = False
+
+# Predefined Assistant IDs (can be overridden by environment variables)
+ASSISTANT_IDS = {
+    1: "asst_NLsQUvc6GlRhgCoQeeJyBNkq",
+    2: "asst_W8bU0mQMLeANzSY58wMh2akb",
+    3: "asst_7RaXLSYWXNIYE2cFjgdkE67O",
+    4: "asst_kzQx2UVBF2saxY6aByenwylg",
+    5: "",
+}
 
 STT_MODEL = "whisper-1"
 CHAT_MODEL = "gpt-4.1-mini"
@@ -861,7 +872,7 @@ def call_assistant(user_text: str) -> tuple[str, str]:
     global assistant_thread_id
     
     if not ASSISTANT_ID:
-        print("❌ ASSISTANT_ID not found. Please provide it as a command-line argument (--assistant-id) or set ASSISTANT_ID environment variable.")
+        print("❌ ASSISTANT_ID not found. Please provide it as a command-line argument: -a [1-5] or -a asst_xxx")
         return "", ""
     
     try:
@@ -1189,9 +1200,13 @@ def main():
                         except Exception as e:
                             print(f"⚠️ Error drawing thinking message: {e}")
                     
-                    # Send to Assistant API coach
-                    print("🤔 Asking Assistant coach...")
-                    spoken_answer, screen_summary = call_assistant(text)
+                    # Send to Assistant API coach or Chat GPT based on mode
+                    if USE_CHAT_MODE:
+                        print("🤔 Asking ChatGPT coach...")
+                        spoken_answer, screen_summary = call_chatgpt(text)
+                    else:
+                        print("🤔 Asking Assistant coach...")
+                        spoken_answer, screen_summary = call_assistant(text)
                     
                     # Check again if button went ON (interrupt thinking)
                     if is_button_on():
@@ -1285,29 +1300,54 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python SimpleBotDubai.py
-  python SimpleBotDubai.py --assistant-id asst_xxxxxxxxxxxxx
-  python SimpleBotDubai.py -a asst_xxxxxxxxxxxxx
+  python SimpleBotDubai.py -a 1               # Use predefined assistant ID #1
+  python SimpleBotDubai.py -a 2               # Use predefined assistant ID #2
+  python SimpleBotDubai.py -a asst_xxx        # Use specific assistant ID
+  python SimpleBotDubai.py -c                 # Use chat mode (ChatGPT) instead of Assistant API
+  python SimpleBotDubai.py -c -a 1            # Use chat mode (assistant ID ignored in chat mode)
         """
     )
     parser.add_argument(
         "--assistant-id", "-a",
         type=str,
         default=None,
-        help="OpenAI Assistant ID (overrides ASSISTANT_ID environment variable)"
+        help="Assistant ID: use 1-5 for predefined IDs, or provide full ID (e.g., asst_xxx)"
+    )
+    parser.add_argument(
+        "--chat", "-c",
+        action="store_true",
+        help="Enable chat mode (use ChatGPT instead of Assistant API)"
     )
     
     args = parser.parse_args()
     
+    # Set USE_CHAT_MODE
+    USE_CHAT_MODE = args.chat
+    if USE_CHAT_MODE:
+        print("💬 Chat mode enabled (using ChatGPT instead of Assistant API)")
+    
     # Set ASSISTANT_ID from command-line argument or environment variable
     if args.assistant_id:
-        ASSISTANT_ID = args.assistant_id
-        print(f"✅ Using Assistant ID from command-line: {ASSISTANT_ID}")
+        # Check if it's a number (1-5) for predefined assistant IDs
+        try:
+            assistant_num = int(args.assistant_id)
+            if 1 <= assistant_num <= 5:
+                ASSISTANT_ID = ASSISTANT_IDS[assistant_num]
+                if ASSISTANT_ID:
+                    print(f"✅ Using predefined Assistant ID #{assistant_num}: {ASSISTANT_ID}")
+                else:
+                    print(f"⚠️  Predefined Assistant ID #{assistant_num} is not set. Please set ASSISTANT_ID_{assistant_num} environment variable.")
+                    ASSISTANT_ID = None
+            else:
+                print(f"⚠️  Assistant ID number must be between 1-5. Using as direct ID: {args.assistant_id}")
+                ASSISTANT_ID = args.assistant_id
+        except ValueError:
+            # Not a number, use as direct assistant ID
+            ASSISTANT_ID = args.assistant_id
+            print(f"✅ Using Assistant ID from command-line: {ASSISTANT_ID}")
     else:
-        ASSISTANT_ID = os.getenv("ASSISTANT_ID")
-        if ASSISTANT_ID:
-            print(f"✅ Using Assistant ID from environment variable: {ASSISTANT_ID}")
-        else:
-            print("⚠️  No Assistant ID provided. Please use --assistant-id or set ASSISTANT_ID environment variable.")
+        # No assistant ID provided
+        if not USE_CHAT_MODE:
+            print("⚠️  No Assistant ID provided. Please use -a [1-5] or -a asst_xxx")
     
     main()
