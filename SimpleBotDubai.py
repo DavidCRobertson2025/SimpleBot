@@ -343,7 +343,7 @@ def speak_text(text: str):
     wav_path = "tts_output.wav"
 
     # Make sure volume is loud enough
-    ensure_volume(20)
+    ensure_volume(25)
 
     print("🔊 Generating speech...")
     try:
@@ -790,7 +790,7 @@ def main():
     else:
         if epd is not None:
             try:
-                draw_centered_message(epd, "WiFi not connected.\n\nTrying to connect...")
+                draw_text_on_epd(epd, "WiFi not connected. Trying to connect...")
                 print("📺 Display: WiFi not connected. Trying to connect...")
             except Exception as e:
                 print(f"⚠️ Error updating display: {e}")
@@ -802,7 +802,7 @@ def main():
         if not wifi_connected:
             if epd is not None:
                 try:
-                    draw_centered_message(epd, "WiFi not connected.\n\nPlease restart.")
+                    draw_text_on_epd(epd, "WiFi not connected. Please restart.")
                     print("📺 Display: WiFi not connected. Please restart.")
                 except Exception as e:
                     print(f"⚠️ Error updating display: {e}")
@@ -823,7 +823,7 @@ def main():
     if not internet_connected:
         if epd is not None:
             try:
-                draw_centered_message(epd, "Internet not connected.\n\nPlease restart.")
+                draw_text_on_epd(epd, "Internet not connected. Please restart.")
                 print("📺 Display: Internet not connected. Please restart.")
             except Exception as e:
                 print(f"⚠️ Error updating display: {e}")
