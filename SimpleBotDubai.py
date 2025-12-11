@@ -1321,10 +1321,14 @@ Examples:
     
     args = parser.parse_args()
     
-    # Set USE_CHAT_MODE
-    USE_CHAT_MODE = args.chat
-    if USE_CHAT_MODE:
-        print("💬 Chat mode enabled (using ChatGPT instead of Assistant API)")
+    # Set USE_CHAT_MODE (default to chat if no parameters provided)
+    if not args.assistant_id and not args.chat:
+        USE_CHAT_MODE = True
+        print("💬 Chat mode enabled by default (no parameters provided)")
+    else:
+        USE_CHAT_MODE = args.chat
+        if USE_CHAT_MODE:
+            print("💬 Chat mode enabled (using ChatGPT instead of Assistant API)")
     
     # Set ASSISTANT_ID from command-line argument or environment variable
     if args.assistant_id:
