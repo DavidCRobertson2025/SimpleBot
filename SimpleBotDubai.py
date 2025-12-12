@@ -447,7 +447,7 @@ def speak_text(text: str):
     wav_path = "tts_output.wav"
 
     # Make sure volume is loud enough
-    ensure_volume(25)
+    ensure_volume(50)
 
     print("🔊 Generating speech...")
     try:
@@ -1012,7 +1012,7 @@ def main():
     # Step 2: Check Internet connectivity (includes WiFi check)
     if epd is not None:
         try:
-            draw_centered_message(epd, "Checking Internet connectivity...")
+            draw_centered_message(epd, "Checking Internet...")
             print("📺 Display: Checking Internet connectivity...")
         except Exception as e:
             print(f"⚠️ Error updating display: {e}")
