@@ -541,12 +541,14 @@ def speak_text(text: str):
 # ---------------------------------------------------------
 # WiFi connectivity utilities
 # ---------------------------------------------------------
-def check_wifi_connected() -> bool:
+def check_internet_connectivity() -> bool:
     """
-    Check if WiFi interface (wlan0) has an IP address.
-    Returns True if WiFi interface is connected, False otherwise.
-    This does NOT check internet connectivity.
+    Check if internet connectivity is available.
+    First checks if WiFi interface (wlan0) has an IP address,
+    then verifies internet connectivity by pinging a reliable server.
+    Returns True if internet is reachable, False otherwise.
     """
+    # Step 1: Check if WiFi interface has an IP address
     try:
         result = subprocess.run(
             ["ip", "addr", "show", "wlan0"],
@@ -554,18 +556,14 @@ def check_wifi_connected() -> bool:
             text=True,
             timeout=2
         )
-        return "inet " in result.stdout
+        has_ip = "inet " in result.stdout
+        if not has_ip:
+            return False
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
         print(f"⚠️ WiFi check error: {e}")
+        return False
     
-    return False
-
-
-def check_internet_connected() -> bool:
-    """
-    Check if internet connectivity is available by pinging a reliable server.
-    Returns True if internet is reachable, False otherwise.
-    """
+    # Step 2: Verify internet connectivity with ping
     try:
         ping_result = subprocess.run(
             ["ping", "-c", "1", "-W", "2", "8.8.8.8"],
@@ -575,16 +573,16 @@ def check_internet_connected() -> bool:
         return ping_result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
         print(f"⚠️ Internet check error: {e}")
-    
-    return False
+        return False
 
 
-def try_connect_wifi():
+def try_connect_internet() -> bool:
     """
-    Attempt to connect to WiFi using available methods.
+    Attempt to connect to internet by first connecting WiFi, then verifying connectivity.
     Tries nmcli first, then wpa_cli if available.
+    Returns True if internet connectivity is established, False otherwise.
     """
-    print("📡 Attempting to connect to WiFi...")
+    print("📡 Attempting to connect to internet...")
     
     # Method 1: Try nmcli (NetworkManager)
     try:
@@ -601,7 +599,7 @@ def try_connect_wifi():
                 timeout=5
             )
             time.sleep(2)
-            return check_wifi_connected()
+            return check_internet_connectivity()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
     
@@ -613,7 +611,7 @@ def try_connect_wifi():
             timeout=5
         )
         time.sleep(3)
-        return check_wifi_connected()
+        return check_internet_connectivity()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
     
@@ -1011,79 +1009,58 @@ def main():
         print(f"⚠️ Failed to init e-Paper: {e}")
         epd = None
     
-    # Step 2: Check WiFi connectivity
+    # Step 2: Check Internet connectivity (includes WiFi check)
     if epd is not None:
         try:
-            draw_centered_message(epd, "Checking WiFi...")
-            print("📺 Display: Checking WiFi...")
-        except Exception as e:
-            print(f"⚠️ Error updating display: {e}")
-    
-    print("📡 Checking WiFi connectivity...")
-    wifi_connected = check_wifi_connected()
-    
-    if wifi_connected:
-        if epd is not None:
-            try:
-                draw_centered_message(epd, "WiFi Connected")
-                print("📺 Display: WiFi Connected")
-            except Exception as e:
-                print(f"⚠️ Error updating display: {e}")
-        print("✅ WiFi is connected")
-        time.sleep(1.5)
-    else:
-        if epd is not None:
-            try:
-                draw_text_on_epd(epd, "WiFi not connected. Trying to connect...")
-                print("📺 Display: WiFi not connected. Trying to connect...")
-            except Exception as e:
-                print(f"⚠️ Error updating display: {e}")
-        print("⚠️ WiFi is not connected. Attempting to connect...")
-        
-        # Try to connect
-        wifi_connected = try_connect_wifi()
-        
-        if not wifi_connected:
-            if epd is not None:
-                try:
-                    draw_text_on_epd(epd, "WiFi not connected. Please restart.")
-                    print("📺 Display: WiFi not connected. Please restart.")
-                except Exception as e:
-                    print(f"⚠️ Error updating display: {e}")
-            print("❌ WiFi is not connected. Please restart the device.")
-            return
-    
-    # Step 3: Check Internet connectivity
-    if epd is not None:
-        try:
-            draw_centered_message(epd, "Checking Internet...")
-            print("📺 Display: Checking Internet...")
+            draw_centered_message(epd, "Checking Internet connectivity...")
+            print("📺 Display: Checking Internet connectivity...")
         except Exception as e:
             print(f"⚠️ Error updating display: {e}")
     
     print("🌐 Checking Internet connectivity...")
-    internet_connected = check_internet_connected()
+    internet_connected = check_internet_connectivity()
     
-    if not internet_connected:
+    if internet_connected:
         if epd is not None:
             try:
-                draw_text_on_epd(epd, "Internet not connected. Please restart.")
-                print("📺 Display: Internet not connected. Please restart.")
+                draw_centered_message(epd, "Internet Connected")
+                print("📺 Display: Internet Connected")
             except Exception as e:
                 print(f"⚠️ Error updating display: {e}")
-        print("❌ Internet is not connected. Please restart the device.")
-        return
+        print("✅ Internet is connected")
+        time.sleep(1.5)
+    else:
+        if epd is not None:
+            try:
+                draw_centered_message(epd, "Internet not connected.\n\nTrying to connect...")
+                print("📺 Display: Internet not connected. Trying to connect...")
+            except Exception as e:
+                print(f"⚠️ Error updating display: {e}")
+        print("⚠️ Internet is not connected. Attempting to connect...")
+        
+        # Try to connect
+        internet_connected = try_connect_internet()
+        
+        if not internet_connected:
+            if epd is not None:
+                try:
+                    draw_text_on_epd(epd, "Internet not connected.\n\nPlease restart.")
+                    print("📺 Display: Internet not connected. Please restart.")
+                except Exception as e:
+                    print(f"⚠️ Error updating display: {e}")
+            print("❌ Internet is not connected. Please restart the device.")
+            return
+        
+        if epd is not None:
+            try:
+                draw_centered_message(epd, "Internet Connected")
+                print("📺 Display: Internet Connected")
+            except Exception as e:
+                print(f"⚠️ Error updating display: {e}")
+        print("✅ Internet is connected")
+        time.sleep(1.5)
     
-    if epd is not None:
-        try:
-            draw_centered_message(epd, "Internet Connected")
-            print("📺 Display: Internet Connected")
-        except Exception as e:
-            print(f"⚠️ Error updating display: {e}")
-    print("✅ Internet is connected")
-    time.sleep(1.5)
-    
-    # Step 4: Initialize agent
+    # Step 3: Initialize agent
     if epd is not None:
         try:
             draw_centered_message(epd, "Initializing agent...")
@@ -1091,9 +1068,22 @@ def main():
         except Exception as e:
             print(f"⚠️ Error updating display: {e}")
     print("🤖 Initializing agent...")
+    
+    # If using Assistant API (not chat mode), create thread now
+    global assistant_thread_id
+    if not USE_CHAT_MODE and ASSISTANT_ID:
+        try:
+            print("🧵 Creating Assistant thread...")
+            thread = client.beta.threads.create()
+            assistant_thread_id = thread.id
+            print(f"✅ Assistant thread created: {assistant_thread_id}")
+        except Exception as e:
+            print(f"⚠️ Failed to create Assistant thread: {e}")
+            print("⚠️ Continuing anyway, thread will be created on first use...")
+    
     time.sleep(1)
     
-    # Step 5: Ready state
+    # Step 4: Ready state
     armed = is_button_on()
     update_led(armed)
 
