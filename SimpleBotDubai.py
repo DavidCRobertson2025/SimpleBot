@@ -77,8 +77,8 @@ interrupt_flag = False
 # ---------------------------------------------------------
 # Audio device configuration (based on your current listing)
 # ---------------------------------------------------------
-MIC_DEVICE_INDEX = 2      # 'USB PnP Audio Device: Audio (hw:3,0)' – has input
-SPEAKER_DEVICE_INDEX = 1  # 'UACDemoV1.0: USB Audio (hw:2,0)' – speaker out
+MIC_DEVICE_INDEX = 1      # 'USB PnP Audio Device: Audio (hw:3,0)' – has input
+SPEAKER_DEVICE_INDEX = 0  # 'UACDemoV1.0: USB Audio (hw:2,0)' – speaker out
 AUDIO_RATE = 48000        # Hz, supported by your USB devices
 
 # ---------------------------------------------------------
