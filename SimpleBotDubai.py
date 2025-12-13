@@ -57,10 +57,10 @@ ASSISTANT_NUMBER = None
 # Predefined Assistant IDs (can be overridden by environment variables)
 ASSISTANT_IDS = {
     1: "asst_buWfn5WgUpzNoPLuZ4kizzxk",
-    2: "asst_W8bU0mQMLeANzSY58wMh2akb",
-    3: "asst_7RaXLSYWXNIYE2cFjgdkE67O",
-    4: "asst_kzQx2UVBF2saxY6aByenwylg",
-    5: "asst_NLsQUvc6GlRhgCoQeeJyBNkq",   
+    2: "asst_7RaXLSYWXNIYE2cFjgdkE67O",
+    3: "asst_Ofph0LfvU1iGEsaATdUGKtQm",
+    4: "asst_9iRVtBtjB0BenwzVffDyLoQ8",
+    5: "asst_BuiOVQcEq2UHfV5DJTz9rFjL",   
 }
 
 STT_MODEL = "whisper-1"
