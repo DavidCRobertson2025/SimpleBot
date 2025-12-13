@@ -51,6 +51,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 ASSISTANT_ID = None
 # USE_CHAT_MODE flag - if True, use chat completions instead of Assistant API
 USE_CHAT_MODE = False
+# ASSISTANT_NUMBER - tracks which assistant number (1-5) is being used, or None if using direct ID
+ASSISTANT_NUMBER = None
 
 # Predefined Assistant IDs (can be overridden by environment variables)
 ASSISTANT_IDS = {
@@ -469,8 +471,15 @@ def ensure_volume(target_percent=75):
 
 
 
-def speak_text(text: str):
-    """Use OpenAI TTS to speak the text through the speaker."""
+def speak_text(text: str, epd=None, screen_summary=None):
+    """
+    Use OpenAI TTS to speak the text through the speaker.
+    
+    Args:
+        text: Text to speak
+        epd: Optional e-paper display object
+        screen_summary: Optional text to display on e-paper before speaking starts
+    """
     if not text:
         return
 
@@ -496,6 +505,13 @@ def speak_text(text: str):
         return
 
     # Convert MP3 to stereo 48 kHz WAV with gain
+        # Update display BEFORE TTS generation starts (if provided)
+    if epd is not None and screen_summary:
+        try:
+            draw_text_on_epd(epd, screen_summary)
+        except Exception as e:
+            print(f"⚠️ Display error: {e}")
+
     try:
         volume_db = 10.0  # ~3x louder
         subprocess.run(
@@ -1092,13 +1108,20 @@ def main():
         time.sleep(1.5)
     
     # Step 3: Initialize agent
+    global ASSISTANT_NUMBER
+    init_message = "Initializing agent..."
+    if not USE_CHAT_MODE and ASSISTANT_NUMBER is not None:
+        init_message = f"Initializing A{ASSISTANT_NUMBER}..."
+    elif not USE_CHAT_MODE and ASSISTANT_ID:
+        init_message = "Initializing Assistant..."
+    
     if epd is not None:
         try:
-            draw_centered_message(epd, "Initializing agent...")
-            print("📺 Display: Initializing agent...")
+            draw_centered_message(epd, init_message)
+            print(f"📺 Display: {init_message}")
         except Exception as e:
             print(f"⚠️ Error updating display: {e}")
-    print("🤖 Initializing agent...")
+    print(f"🤖 {init_message}")
     
     # If using Assistant API (not chat mode), create thread now and send default greeting
     global assistant_thread_id
@@ -1113,7 +1136,10 @@ def main():
             print("👋 Sending default greeting to assistant...")
             if epd is not None:
                 try:
-                    draw_centered_message(epd, "Initializing...")
+                    if ASSISTANT_NUMBER is not None:
+                        draw_centered_message(epd, f"Initializing A{ASSISTANT_NUMBER}...")
+                    else:
+                        draw_centered_message(epd, "Initializing...")
                 except Exception as e:
                     print(f"⚠️ Error updating display: {e}")
             
@@ -1122,13 +1148,8 @@ def main():
             
             if spoken_answer or screen_summary:
                 print(f"🤖 Assistant greeting response: {spoken_answer}")
-                if epd is not None:
-                    try:
-                        draw_text_on_epd(epd, screen_summary)
-                    except Exception as e:
-                        print(f"⚠️ Display error: {e}")
-                # Speak the greeting response
-                speak_text(spoken_answer)
+                # Speak the greeting response (display will update before TTS generation)
+                speak_text(spoken_answer, epd=epd, screen_summary=screen_summary)
             else:
                 print("⚠️ No response from assistant for greeting")
         except Exception as e:
@@ -1266,21 +1287,14 @@ def main():
                     print(f"🤖 Spoken: {spoken_answer}")
                     print(f"📺 Screen: {screen_summary}")
                     
-                    # Update e-ink screen
-                    if epd is not None:
-                        try:
-                            draw_text_on_epd(epd, screen_summary)
-                        except Exception as e:
-                            print(f"⚠️ Display error: {e}")
-                    
                     # Check again if button went ON (interrupt before speaking)
                     if is_button_on():
                         print("🛑 Button pressed — interrupting before speaking.")
                         processing = False
                         continue
                     
-                    # Speak answer (will be interrupted if button goes ON)
-                    speak_text(spoken_answer)
+                    # Speak answer (display will update before TTS generation starts)
+                    speak_text(spoken_answer, epd=epd, screen_summary=screen_summary)
                     
                     # Final check after speaking
                     if is_button_on():
@@ -1356,7 +1370,7 @@ Examples:
     
     args = parser.parse_args()
     
-    # Set USE_CHAT_MODE
+    # Set USE_CHAT_MODE (module-level variable, no global needed here)
     USE_CHAT_MODE = args.chat
     if USE_CHAT_MODE:
         print("💬 Chat mode enabled (using ChatGPT instead of Assistant API)")
@@ -1368,25 +1382,31 @@ Examples:
             assistant_num = int(args.assistant_id)
             if 1 <= assistant_num <= 5:
                 ASSISTANT_ID = ASSISTANT_IDS[assistant_num]
+                ASSISTANT_NUMBER = assistant_num
                 if ASSISTANT_ID:
                     print(f"✅ Using predefined Assistant ID #{assistant_num}: {ASSISTANT_ID}")
                 else:
                     print(f"⚠️  Predefined Assistant ID #{assistant_num} is not set.")
                     ASSISTANT_ID = None
+                    ASSISTANT_NUMBER = None
             else:
                 print(f"⚠️  Assistant ID number must be between 1-5. Using as direct ID: {args.assistant_id}")
                 ASSISTANT_ID = args.assistant_id
+                ASSISTANT_NUMBER = None
         except ValueError:
             # Not a number, use as direct assistant ID
             ASSISTANT_ID = args.assistant_id
+            ASSISTANT_NUMBER = None
             print(f"✅ Using Assistant ID from command-line: {ASSISTANT_ID}")
     else:
         # No assistant ID provided - default to assistant ID 1 (unless chat mode)
         if not USE_CHAT_MODE:
             ASSISTANT_ID = ASSISTANT_IDS[1]
+            ASSISTANT_NUMBER = 1
             if ASSISTANT_ID:
                 print(f"✅ Using default Assistant ID #1: {ASSISTANT_ID}")
             else:
                 print("⚠️  Default Assistant ID #1 is not set. Please use -a [1-5] or -a asst_xxx, or -c for chat mode")
+                ASSISTANT_NUMBER = None
     
     main()
