@@ -54,11 +54,11 @@ USE_CHAT_MODE = False
 
 # Predefined Assistant IDs (can be overridden by environment variables)
 ASSISTANT_IDS = {
-    1: "asst_NLsQUvc6GlRhgCoQeeJyBNkq",
+    1: "asst_buWfn5WgUpzNoPLuZ4kizzxk",
     2: "asst_W8bU0mQMLeANzSY58wMh2akb",
     3: "asst_7RaXLSYWXNIYE2cFjgdkE67O",
     4: "asst_kzQx2UVBF2saxY6aByenwylg",
-    5: "asst_buWfn5WgUpzNoPLuZ4kizzxk",
+    5: "asst_NLsQUvc6GlRhgCoQeeJyBNkq",   
 }
 
 STT_MODEL = "whisper-1"
@@ -117,11 +117,16 @@ def is_meaningful_text(text: str) -> bool:
     Heuristic filter to ignore background noise / nonsense.
     For English-only input, we require:
       - Not empty
-      - At least 2 words
+      - At least 2 words (or greetings/salutations if in assistant mode)
       - Mostly alphabetic characters
       - Contains vowels
       - No non-Latin scripts (Arabic, CJK, etc.)
+    
+    When using Assistant API (not chat mode), also accepts greetings/salutations
+    like "hello", "hi", etc. as valid single-word inputs.
     """
+    global USE_CHAT_MODE
+    
     if not text:
         return False
 
@@ -144,6 +149,23 @@ def is_meaningful_text(text: str) -> bool:
     # Extract "words" as alphabetic sequences
     import re
     words = re.findall(r"[a-zA-Z]+", lower)
+
+    # Acceptable greetings/salutations (for assistant mode)
+    GREETINGS = {
+        "hello", "hi", "hey", "greetings", "salutations",
+        "good morning", "good afternoon", "good evening",
+        "good day", "howdy", "hi there", "hello there"
+    }
+    
+    # If in assistant mode, check if it's a greeting
+    if not USE_CHAT_MODE:
+        # Check if the entire text (normalized) is a greeting
+        normalized = " ".join(words)
+        if normalized in GREETINGS:
+            return True
+        # Also check individual words for single-word greetings
+        if len(words) == 1 and words[0] in GREETINGS:
+            return True
 
     # Require at least 2 words (filters out "yes", "ok thanks", etc.)
     if len(words) < 2:
@@ -1311,16 +1333,12 @@ Examples:
     
     args = parser.parse_args()
     
-    # Set USE_CHAT_MODE (default to chat if no parameters provided)
-    if not args.assistant_id and not args.chat:
-        USE_CHAT_MODE = True
-        print("💬 Chat mode enabled by default (no parameters provided)")
-    else:
-        USE_CHAT_MODE = args.chat
-        if USE_CHAT_MODE:
-            print("💬 Chat mode enabled (using ChatGPT instead of Assistant API)")
+    # Set USE_CHAT_MODE
+    USE_CHAT_MODE = args.chat
+    if USE_CHAT_MODE:
+        print("💬 Chat mode enabled (using ChatGPT instead of Assistant API)")
     
-    # Set ASSISTANT_ID from command-line argument or environment variable
+    # Set ASSISTANT_ID from command-line argument
     if args.assistant_id:
         # Check if it's a number (1-5) for predefined assistant IDs
         try:
@@ -1330,7 +1348,7 @@ Examples:
                 if ASSISTANT_ID:
                     print(f"✅ Using predefined Assistant ID #{assistant_num}: {ASSISTANT_ID}")
                 else:
-                    print(f"⚠️  Predefined Assistant ID #{assistant_num} is not set. Please set ASSISTANT_ID_{assistant_num} environment variable.")
+                    print(f"⚠️  Predefined Assistant ID #{assistant_num} is not set.")
                     ASSISTANT_ID = None
             else:
                 print(f"⚠️  Assistant ID number must be between 1-5. Using as direct ID: {args.assistant_id}")
@@ -1340,8 +1358,12 @@ Examples:
             ASSISTANT_ID = args.assistant_id
             print(f"✅ Using Assistant ID from command-line: {ASSISTANT_ID}")
     else:
-        # No assistant ID provided
+        # No assistant ID provided - default to assistant ID 1 (unless chat mode)
         if not USE_CHAT_MODE:
-            print("⚠️  No Assistant ID provided. Please use -a [1-5] or -a asst_xxx")
+            ASSISTANT_ID = ASSISTANT_IDS[1]
+            if ASSISTANT_ID:
+                print(f"✅ Using default Assistant ID #1: {ASSISTANT_ID}")
+            else:
+                print("⚠️  Default Assistant ID #1 is not set. Please use -a [1-5] or -a asst_xxx, or -c for chat mode")
     
     main()
