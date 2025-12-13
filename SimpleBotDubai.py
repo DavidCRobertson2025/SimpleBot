@@ -314,6 +314,7 @@ def record_audio(
 def record_while_button_on(
     filename="input.wav",
     max_duration=30.0,
+    epd=None,
 ):
     """
     Records audio continuously while the button is ON.
@@ -322,6 +323,7 @@ def record_while_button_on(
     Args:
         filename: Output WAV file path
         max_duration: Maximum recording duration in seconds (safety limit)
+        epd: E-Paper display object (optional, for updating display when recording starts)
     
     Returns:
         filename or None if nothing captured.
@@ -354,6 +356,13 @@ def record_while_button_on(
         p.terminate()
         return None
 
+    # Update display to show "Listening..." as soon as recording actually starts
+    if epd is not None:
+        try:
+            draw_centered_message(epd, "Listening...")
+        except Exception as e:
+            print(f"⚠️ Error updating display: {e}")
+    
     print("👂 Recording while button is ON...")
     frames = []
     start_time = time.time()
@@ -1091,7 +1100,7 @@ def main():
             print(f"⚠️ Error updating display: {e}")
     print("🤖 Initializing agent...")
     
-    # If using Assistant API (not chat mode), create thread now
+    # If using Assistant API (not chat mode), create thread now and send default greeting
     global assistant_thread_id
     if not USE_CHAT_MODE and ASSISTANT_ID:
         try:
@@ -1099,8 +1108,31 @@ def main():
             thread = client.beta.threads.create()
             assistant_thread_id = thread.id
             print(f"✅ Assistant thread created: {assistant_thread_id}")
+            
+            # Send default greeting to assistant
+            print("👋 Sending default greeting to assistant...")
+            if epd is not None:
+                try:
+                    draw_centered_message(epd, "Initializing...")
+                except Exception as e:
+                    print(f"⚠️ Error updating display: {e}")
+            
+            default_greeting = "Hi"
+            spoken_answer, screen_summary = call_assistant(default_greeting)
+            
+            if spoken_answer or screen_summary:
+                print(f"🤖 Assistant greeting response: {spoken_answer}")
+                if epd is not None:
+                    try:
+                        draw_text_on_epd(epd, screen_summary)
+                    except Exception as e:
+                        print(f"⚠️ Display error: {e}")
+                # Speak the greeting response
+                speak_text(spoken_answer)
+            else:
+                print("⚠️ No response from assistant for greeting")
         except Exception as e:
-            print(f"⚠️ Failed to create Assistant thread: {e}")
+            print(f"⚠️ Failed to create Assistant thread or send greeting: {e}")
             print("⚠️ Continuing anyway, thread will be created on first use...")
     
     time.sleep(1)
@@ -1142,14 +1174,9 @@ def main():
                     print("🎤 Button ON — starting to listen (interrupting any current operation)...")
                     processing = False  # Stop any processing
                     audio_path = None  # Reset any previous recording
-                    if epd is not None:
-                        try:
-                            draw_centered_message(epd, "Listening...")
-                        except Exception as e:
-                            print(f"⚠️ Error updating display: {e}")
-                    # Start recording immediately
+                    # Start recording immediately (display will update when recording actually starts)
                     print("\a", end="", flush=True)
-                    audio_path = record_while_button_on()
+                    audio_path = record_while_button_on(epd=epd)
                 
                 # Button just went OFF: stop recording and process
                 elif not armed and audio_path and not processing:
@@ -1272,13 +1299,9 @@ def main():
             # If button is ON and we're not recording, start recording
             elif armed and audio_path is None and not processing:
                 print("🎤 Button ON — starting to listen...")
-                if epd is not None:
-                    try:
-                        draw_centered_message(epd, "Listening...")
-                    except Exception as e:
-                        print(f"⚠️ Error updating display: {e}")
+                # Start recording immediately (display will update when recording actually starts)
                 print("\a", end="", flush=True)
-                audio_path = record_while_button_on()
+                audio_path = record_while_button_on(epd=epd)
             
             # If button is OFF and no audio to process, just wait
             elif not armed and audio_path is None and not processing:
