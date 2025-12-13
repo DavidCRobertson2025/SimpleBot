@@ -584,6 +584,17 @@ def speak_text(text: str, epd=None, screen_summary=None):
                 wf.close()
                 p.terminate()
                 return
+            
+            # Warn if using USB PnP Audio Device (this is the microphone, not speaker)
+            if "USB PnP Audio Device" in dev_name and "UACDemo" not in dev_name:
+                print(f"⚠️  WARNING: Device {output_index} appears to be the microphone, not the speaker!")
+                print("💡 Available output devices (look for UACDemoV1.0):")
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info.get('maxOutputChannels', 0) > 0:
+                        marker = " ← USE THIS FOR SPEAKER" if "UACDemo" in info.get('name', '') else ""
+                        print(f"   Index {i}: {info.get('name')} - {info.get('maxOutputChannels')} output channels{marker}")
+                print("⚠️  Audio may not work correctly. Please update SPEAKER_DEVICE_INDEX in the code.")
         except Exception as e:
             print(f"❌ Could not get info for output device {output_index}: {e}")
             wf.close()
