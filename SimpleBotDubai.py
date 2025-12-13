@@ -224,7 +224,20 @@ def record_audio(
 
     try:
         dev_info = p.get_device_info_by_index(input_index)
-        print(f"🎤 Using input device {input_index}: {dev_info.get('name')!r}")
+        dev_name = dev_info.get('name', 'Unknown')
+        max_input_channels = dev_info.get('maxInputChannels', 0)
+        print(f"🎤 Using input device {input_index}: {dev_name!r} (Input channels: {max_input_channels})")
+        
+        # Validate device has input capability
+        if max_input_channels == 0:
+            print(f"❌ Device {input_index} ({dev_name}) has no input channels!")
+            print("💡 Available input devices:")
+            for i in range(p.get_device_count()):
+                info = p.get_device_info_by_index(i)
+                if info.get('maxInputChannels', 0) > 0:
+                    print(f"   Index {i}: {info.get('name')} - {info.get('maxInputChannels')} input channels")
+            p.terminate()
+            return None
     except Exception as e:
         print(f"❌ Could not get info for input device {input_index}: {e}")
         p.terminate()
@@ -337,7 +350,20 @@ def record_while_button_on(
 
     try:
         dev_info = p.get_device_info_by_index(input_index)
-        print(f"🎤 Using input device {input_index}: {dev_info.get('name')!r}")
+        dev_name = dev_info.get('name', 'Unknown')
+        max_input_channels = dev_info.get('maxInputChannels', 0)
+        print(f"🎤 Using input device {input_index}: {dev_name!r} (Input channels: {max_input_channels})")
+        
+        # Validate device has input capability
+        if max_input_channels == 0:
+            print(f"❌ Device {input_index} ({dev_name}) has no input channels!")
+            print("💡 Available input devices:")
+            for i in range(p.get_device_count()):
+                info = p.get_device_info_by_index(i)
+                if info.get('maxInputChannels', 0) > 0:
+                    print(f"   Index {i}: {info.get('name')} - {info.get('maxInputChannels')} input channels")
+            p.terminate()
+            return None
     except Exception as e:
         print(f"❌ Could not get info for input device {input_index}: {e}")
         p.terminate()
@@ -543,7 +569,21 @@ def speak_text(text: str, epd=None, screen_summary=None):
         output_index = SPEAKER_DEVICE_INDEX
         try:
             dev_info = p.get_device_info_by_index(output_index)
-            print(f"🔊 Using output device {output_index}: {dev_info.get('name')!r}")
+            dev_name = dev_info.get('name', 'Unknown')
+            max_output_channels = dev_info.get('maxOutputChannels', 0)
+            print(f"🔊 Using output device {output_index}: {dev_name!r} (Output channels: {max_output_channels})")
+            
+            # Validate device has output capability
+            if max_output_channels == 0:
+                print(f"❌ Device {output_index} ({dev_name}) has no output channels!")
+                print("💡 Available output devices:")
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info.get('maxOutputChannels', 0) > 0:
+                        print(f"   Index {i}: {info.get('name')} - {info.get('maxOutputChannels')} output channels")
+                wf.close()
+                p.terminate()
+                return
         except Exception as e:
             print(f"❌ Could not get info for output device {output_index}: {e}")
             wf.close()
