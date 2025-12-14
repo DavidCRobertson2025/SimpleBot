@@ -513,7 +513,7 @@ def speak_text(text: str, epd=None, screen_summary=None):
     wav_path = "tts_output.wav"
 
     # Make sure volume is loud enough
-    ensure_volume(50)
+    ensure_volume(100)
 
     print("🔊 Generating speech...")
     try:
