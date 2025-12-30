@@ -10,6 +10,9 @@ import subprocess
 import re
 import digitalio
 import sys
+import queue
+from PIL import Image, ImageDraw, ImageFont
+
 
 # Load the .env file with the ChatGPT API key
 from dotenv import load_dotenv
@@ -20,6 +23,8 @@ from openai import OpenAI, APIConnectionError
 import board
 import busio
 from adafruit_pca9685 import PCA9685
+
+from waveshare_epd import epd2in13_V4
 
 # ================================================================
 #  PLATFORM SELECTION
@@ -32,18 +37,18 @@ USE_PI5 = True
 # ================================================================
 #  OPENAI CONFIGURATION
 # ================================================================
-
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 CHAT_MODEL = "gpt-4.1-mini"
 TTS_MODEL = "gpt-4o-mini-tts"
 VOICE_NAME = "echo"
 
+# ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+
 
 # ================================================================
 #  AUDIO DEVICE CONFIGURATION
 # ================================================================
-
 IDLE_PHRASES = [
     "Ready when you are.",
     "Anything I can help with?",
@@ -60,7 +65,6 @@ def find_audio_devices():
 
     for i in range(p.get_device_count()):
         info = p.get_device_info_by_index(i)
-
         name = info.get("name", "").lower()
 
         # Find USB microphone
@@ -80,7 +84,6 @@ def find_audio_devices():
 # ================================================================
 #  SERVO / EYE CONFIGURATION
 # ================================================================
-
 i2c = busio.I2C(board.SCL, board.SDA)
 pca = PCA9685(i2c)
 pca.frequency = 50
@@ -92,7 +95,7 @@ RIGHT_X, RIGHT_Y, RIGHT_BLINK = 3, 4, 5
 # Movement limits
 X_LIMITS = (70, 110)
 Y_LIMITS = (70, 110)
-BLINK_LIMITS = (0, 40)
+BLINK_LIMITS = (0, 50)
 
 # Servo directions
 DIR_LEFT_X = 1
@@ -101,17 +104,21 @@ DIR_LEFT_BLINK = 1
 
 DIR_RIGHT_X = 1
 DIR_RIGHT_Y = -1
-DIR_RIGHT_BLINK = -1
+DIR_RIGHT_BLINK = 1
 
-# Blink configuration
-BLINK_OPEN_LEFT = -12
-BLINK_OPEN_RIGHT = 0
-BLINK_SIDE_DELAY = 0.07
+# Eyelid calibration
+LEFT_BLINK_OPEN = 10
+LEFT_BLINK_CLOSED = 50
+
+RIGHT_BLINK_OPEN = 40     # fully open from your test
+RIGHT_BLINK_CLOSED = 0    # fully closed from your test
+
+BLINK_SIDE_DELAY = 0.02
 
 MOVE_STEP = 1
 MOVE_DELAY = 0.01
 BLINK_INTERVAL = (7, 12)
-BLINK_SPEED = 0.003
+BLINK_SPEED = 0.01
 BLINK_HOLD = 0.10
 
 last_blink_timestamp = 0.0
@@ -139,7 +146,6 @@ current_servo_angles = {}
 # ================================================================
 #  NEOPIXEL MOUTH CONFIGURATION (Pi 4 / Pi 5)
 # ================================================================
-
 NEOPIXEL_PIN = board.D13
 NUM_PIXELS = 8
 
@@ -211,7 +217,6 @@ def clear_mouth():
 # ================================================================
 #  LISTEN BUTTON + LED CONFIGURATION
 # ================================================================
-
 # We'll use GPIO22 for the button, GPIO23 for the LED
 BUTTON_PIN = board.D22   # Physical pin 15
 LISTEN_LED_PIN = board.D23  # Physical pin 16
@@ -226,15 +231,20 @@ listen_led = digitalio.DigitalInOut(LISTEN_LED_PIN)
 listen_led.direction = digitalio.Direction.OUTPUT
 listen_led.value = False
 
+def button_is_off() -> bool:
+    # OFF = listen_button.value True (pull-up)
+    return listen_button.value
 
 # ================================================================
 #  SERVO + EYE CONTROL
 # ================================================================
-
 def set_servo_angle(channel, direction, angle):
     """Send corrected angle to PCA9685 servo."""
     if direction == -1:
         angle = 180 - angle
+
+    # 🔒 Safety clamp: keep angle in [0, 180] to avoid crazy pulses
+    angle = max(0, min(180, angle))
 
     pulse_range = MAX_PULSE_MS - MIN_PULSE_MS
     pulse_width = MIN_PULSE_MS + (pulse_range * angle / 180.0)
@@ -292,28 +302,47 @@ def blink_eyes(probability=1.0):
     if random.random() > probability:
         return
 
-    left_open = BLINK_OPEN_LEFT
-    right_open = BLINK_OPEN_RIGHT
-    closed = BLINK_LIMITS[1]
+    # Use calibrated per-eye positions
+    left_open = LEFT_BLINK_OPEN
+    left_closed = LEFT_BLINK_CLOSED
 
-    left_range = closed - left_open
-    right_range = closed - right_open
+    right_open = RIGHT_BLINK_OPEN
+    right_closed = RIGHT_BLINK_CLOSED
 
-    steps_total = max(left_range, right_range)
+    left_span = abs(left_closed - left_open)
+    right_span = abs(right_closed - right_open)
+    side_offset_steps = int(round(BLINK_SIDE_DELAY / BLINK_SPEED))
+
+    steps_total = max(left_span, right_span) + side_offset_steps
+
     if steps_total <= 0:
         return
 
-    side_offset_steps = int(round(BLINK_SIDE_DELAY / BLINK_SPEED))
+    
 
+    # -----------------------------
     # Closing motion
+    # -----------------------------
     for step in range(0, steps_total + 1):
-        left_progress = min(step, left_range) / left_range if left_range > 0 else 1.0
+        # LEFT eye progress [0..1]
+        left_progress = (
+            min(step, left_span) / left_span
+            if left_span > 0 else 1.0
+        )
 
+        # RIGHT eye progress with a slight delay
         right_step_corrected = max(0, step - side_offset_steps)
-        right_progress = min(right_step_corrected, right_range) / right_range if right_range > 0 else 1.0
+        right_progress = (
+            min(right_step_corrected, right_span) / right_span
+            if right_span > 0 else 1.0
+        )
 
-        left_angle = int(left_open + left_progress * left_range)
-        right_angle = int(right_open + right_progress * right_range)
+        left_angle = int(
+            left_open + left_progress * (left_closed - left_open)
+        )
+        right_angle = int(
+            right_open + right_progress * (right_closed - right_open)
+        )
 
         set_servo_angle(LEFT_BLINK, DIR_LEFT_BLINK, left_angle)
         set_servo_angle(RIGHT_BLINK, DIR_RIGHT_BLINK, right_angle)
@@ -322,15 +351,27 @@ def blink_eyes(probability=1.0):
 
     time.sleep(BLINK_HOLD)
 
+    # -----------------------------
     # Opening motion
+    # -----------------------------
     for step in range(steps_total, -1, -1):
-        left_progress = min(step, left_range) / left_range if left_range > 0 else 1.0
+        left_progress = (
+            min(step, left_span) / left_span
+            if left_span > 0 else 1.0
+        )
 
         right_step_corrected = max(0, step - side_offset_steps)
-        right_progress = min(right_step_corrected, right_range) / right_range if right_range > 0 else 1.0
+        right_progress = (
+            min(right_step_corrected, right_span) / right_span
+            if right_span > 0 else 1.0
+        )
 
-        left_angle = int(left_open + left_progress * left_range)
-        right_angle = int(right_open + right_progress * right_range)
+        left_angle = int(
+            left_open + left_progress * (left_closed - left_open)
+        )
+        right_angle = int(
+            right_open + right_progress * (right_closed - right_open)
+        )
 
         set_servo_angle(LEFT_BLINK, DIR_LEFT_BLINK, left_angle)
         set_servo_angle(RIGHT_BLINK, DIR_RIGHT_BLINK, right_angle)
@@ -338,9 +379,9 @@ def blink_eyes(probability=1.0):
         time.sleep(BLINK_SPEED)
 
 
+
 def wink():
     """Random single-eye wink."""
-
     global last_blink_timestamp, is_armed
     if not is_armed:
         return
@@ -348,40 +389,39 @@ def wink():
     last_blink_timestamp = time.time()
     chosen_side = random.choice(["left", "right"])
 
-    left_open = BLINK_OPEN_LEFT
-    right_open = BLINK_OPEN_RIGHT
-    closed = BLINK_LIMITS[1]
-
-    steps = abs(closed - left_open)
-
-    # LEFT wink
     if chosen_side == "left":
-        for step in range(steps + 1):
-            angle = int(left_open + (closed - left_open) * (step / steps))
-            set_servo_angle(LEFT_BLINK, DIR_LEFT_BLINK, angle)
-            time.sleep(BLINK_SPEED)
+        open_pos = LEFT_BLINK_OPEN
+        closed_pos = LEFT_BLINK_CLOSED
+        ch = LEFT_BLINK
+        direction = DIR_LEFT_BLINK
+    else:  # right wink
+        open_pos = RIGHT_BLINK_OPEN
+        closed_pos = RIGHT_BLINK_CLOSED
+        ch = RIGHT_BLINK
+        direction = DIR_RIGHT_BLINK
 
-        time.sleep(BLINK_HOLD)
+    span = abs(closed_pos - open_pos)
+    if span <= 0:
+        return
 
-        for step in range(steps, -1, -1):
-            angle = int(left_open + (closed - left_open) * (step / steps))
-            set_servo_angle(LEFT_BLINK, DIR_LEFT_BLINK, angle)
-            time.sleep(BLINK_SPEED)
+    # Close
+    for step in range(span + 1):
+        progress = step / span
+        angle = int(open_pos + progress * (closed_pos - open_pos))
+        set_servo_angle(ch, direction, angle)
+        time.sleep(BLINK_SPEED)
 
-    else:  # RIGHT wink
-        for step in range(steps + 1):
-            angle = int(right_open + (closed - right_open) * (step / steps))
-            set_servo_angle(RIGHT_BLINK, DIR_RIGHT_BLINK, angle)
-            time.sleep(BLINK_SPEED)
+    time.sleep(BLINK_HOLD)
 
-        time.sleep(BLINK_HOLD)
-
-        for step in range(steps, -1, -1):
-            angle = int(right_open + (closed - right_open) * (step / steps))
-            set_servo_angle(RIGHT_BLINK, DIR_RIGHT_BLINK, angle)
-            time.sleep(BLINK_SPEED)
+    # Open again
+    for step in range(span, -1, -1):
+        progress = step / span
+        angle = int(open_pos + progress * (closed_pos - open_pos))
+        set_servo_angle(ch, direction, angle)
+        time.sleep(BLINK_SPEED)
 
     last_blink_timestamp = time.time()
+
 
 
 def blink_twice():
@@ -534,8 +574,8 @@ def center_eyes():
     neutral_x = (X_LIMITS[0] + X_LIMITS[1]) // 2
     neutral_y = (Y_LIMITS[0] + Y_LIMITS[1]) // 2
 
-    left_blink_open = BLINK_OPEN_LEFT
-    right_blink_open = BLINK_OPEN_RIGHT
+    left_blink_open = LEFT_BLINK_OPEN
+    right_blink_open = RIGHT_BLINK_OPEN
 
     current_servo_angles.update({
         LEFT_X: neutral_x,
@@ -557,30 +597,26 @@ def center_eyes():
 
 def set_eyelids_closed():
     """Close both eyelids fully (sleep state)."""
-    closed = BLINK_LIMITS[1]
+    center_eyes()
 
-    # 1. Drive eyelids to the closed angle
-    set_servo_angle(LEFT_BLINK, DIR_LEFT_BLINK, closed)
-    set_servo_angle(RIGHT_BLINK, DIR_RIGHT_BLINK, closed)
-    current_servo_angles[LEFT_BLINK] = closed
-    current_servo_angles[RIGHT_BLINK] = closed
+    set_servo_angle(LEFT_BLINK, DIR_LEFT_BLINK, LEFT_BLINK_CLOSED)
+    set_servo_angle(RIGHT_BLINK, DIR_RIGHT_BLINK, RIGHT_BLINK_CLOSED)
 
-    # 2. Give the servos time to actually move there
-    time.sleep(0.3)  # tweak 0.2–0.4s if needed
+    current_servo_angles[LEFT_BLINK] = LEFT_BLINK_CLOSED
+    current_servo_angles[RIGHT_BLINK] = RIGHT_BLINK_CLOSED
 
-    # 3. Then relax the servos by turning off PWM on those channels
-    pca.channels[LEFT_BLINK].duty_cycle = 0
-    pca.channels[RIGHT_BLINK].duty_cycle = 0
+    # small pause so they reach position; keep power on so they stay closed
+    time.sleep(0.3)
 
 
 def set_eyelids_open():
     """Open both eyelids to normal trim (awake state)."""
-    left_open = BLINK_OPEN_LEFT
-    right_open = BLINK_OPEN_RIGHT
-    set_servo_angle(LEFT_BLINK, DIR_LEFT_BLINK, left_open)
-    set_servo_angle(RIGHT_BLINK, DIR_RIGHT_BLINK, right_open)
-    current_servo_angles[LEFT_BLINK] = left_open
-    current_servo_angles[RIGHT_BLINK] = right_open
+    set_servo_angle(LEFT_BLINK, DIR_LEFT_BLINK, LEFT_BLINK_OPEN)
+    set_servo_angle(RIGHT_BLINK, DIR_RIGHT_BLINK, RIGHT_BLINK_OPEN)
+
+    current_servo_angles[LEFT_BLINK] = LEFT_BLINK_OPEN
+    current_servo_angles[RIGHT_BLINK] = RIGHT_BLINK_OPEN
+
 
 
 def set_offline_face():
@@ -621,7 +657,6 @@ def set_offline_face():
 # ================================================================
 #  AUDIO RECORDING + TRANSCRIPTION
 # ================================================================
-
 def transcribe_audio(filename):
     """Use Whisper API to convert audio to text."""
     print("🧠 Transcribing...")
@@ -684,12 +719,10 @@ def is_meaningful_text(text: str) -> bool:
     return True
 
 
-
 # ================================================================
 #  SPEECH SYNTHESIS + MOUTH MOVEMENT
 # ================================================================
-
-def record_audio(filename="input.wav", threshold=2400, silence_duration=0.6):
+def record_audio(filename="input.wav", threshold=1800, silence_duration=0.6, max_wait_for_speech = 5.0, max_record_seconds=12.0):
     """
     Voice-activated audio recorder:
       - Starts when RMS > threshold
@@ -721,13 +754,32 @@ def record_audio(filename="input.wav", threshold=2400, silence_duration=0.6):
     recording_started = False
     silence_start = None
 
+    start_time = time.time()
+
     try:
         while True:
+            if listen_button.value:
+                print("Button turned off - cancelling recording.")
+                epd_show_status("  Button off.  Cancelling recording.", "")
+                break
+
+            if not recording_started and (time.time() - start_time) > max_wait_for_speech:
+                print("No speech detected - timeout.")
+                epd_show_status("  No speech detected - timeout.", "")
+                break
+
+            if recording_started and (time.time() - start_time) > max_record_seconds:
+                print("Max recording length hit - stopping.")
+                epd_show_status("  Max recording length reached - stopping.", "")
+                break
+
             update_listen_led_state()
 
-            # Abort if button turned off
+            # Abort if button turned off → just cancel this recording.
+            # main() will detect the state change and handle sleep.
             if listen_button.value:
                 print("🔕 Button turned off — cancelling recording.")
+                epd_show_status("  Button turned off - cancelling recording", "")
                 break
 
             data = stream.read(CHUNK, exception_on_overflow=False)
@@ -778,7 +830,7 @@ def record_audio(filename="input.wav", threshold=2400, silence_duration=0.6):
 
 def speak_text(text, color=(0, 0, 255)):
     """Speak via TTS and animate mouth with amplitude levels."""
-    global is_speaking, previous_audio_level
+    global is_speaking, previous_audio_level, is_armed
 
     is_speaking = True
 
@@ -841,6 +893,13 @@ def speak_text(text, color=(0, 0, 255)):
     playback_start_time = time.time() + audio_playback_delay
 
     while data:
+        # 🚨 If button is turned off while speaking, just stop speech.
+        # main() will notice the state change and handle sleep/wake visuals.
+        if is_armed and listen_button.value:
+            print("🔕 Button turned off — stopping speech.")
+            break
+
+
         # Keep LED in sync with button even while speaking
         update_listen_led_state()
 
@@ -871,16 +930,190 @@ def speak_text(text, color=(0, 0, 255)):
     audio_interface.terminate()
     wave_file.close()
 
-    os.remove(mp3_path)
-    os.remove(wav_path)
+    # Clean up files if they exist
+    if os.path.exists(mp3_path):
+        os.remove(mp3_path)
+    if os.path.exists(wav_path):
+        os.remove(wav_path)
 
     is_speaking = False
 
 
 # ================================================================
+#  WAVESHARE E-INK (2.13" V4) DISPLAY
+# ================================================================
+EPD = None
+EPD_LOCK = threading.Lock()
+
+EPD_FONT_SMALL = None
+EPD_FONT_MED = None
+EPD_FONT_LARGE = None
+
+EPD_LAST_DRAW = 0.0
+EPD_MIN_INTERVAL = 0.8  # seconds between refreshes
+
+
+def epd_init():
+    """Initialize the Waveshare 2.13" V4 display once."""
+    global EPD, EPD_FONT_SMALL, EPD_FONT_MED, EPD_FONT_LARGE
+    try:
+        EPD = epd2in13_V4.EPD()
+        EPD.init()
+        EPD.Clear(0xFF)
+        EPD_FONT_SMALL = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12
+        )
+        EPD_FONT_MED = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16
+        )
+        EPD_FONT_LARGE = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20
+        )
+
+        epd_show_status("  Chatbot starting…", "")
+        print("✅ E-ink initialized.")
+        return True
+    except Exception as e:
+        print(f"❌ E-ink init failed: {e}")
+        EPD = None
+        return False
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Very simple word-wrap for the small display."""
+    if not text:
+        return [""]
+    words = text.split()
+    lines, line = [], ""
+    for w in words:
+        test = (line + " " + w).strip()
+        if len(test) <= width:
+            line = test
+        else:
+            lines.append(line)
+            line = w
+    lines.append(line)
+    return lines
+
+def _text_w(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
+
+def _line_h(draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont) -> int:
+    bbox = draw.textbbox((0, 0), "Ag", font=font)
+    return (bbox[3] - bbox[1])
+
+def _wrap_pixels(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_w: int) -> list[str]:
+    """Wrap text so each line fits within max_w pixels."""
+    if not text:
+        return []
+
+    words = text.split()
+    lines = []
+    cur = ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        if _text_w(draw, test, font) <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+def _fit_lines_for_font(draw, lines: list[str], font, max_h: int, line_spacing: int) -> bool:
+    lh = _line_h(draw, font)
+    total = len(lines) * lh + max(0, len(lines) - 1) * line_spacing
+    return total <= max_h
+
+def epd_show_status(status: str, line1: str = "", line2: str = ""):
+    """
+    Centered, wrapped, large-font display:
+      - status + optional body lines
+      - no border lines
+      - auto-wrap in pixels
+      - centered horizontally and vertically
+    """
+    global EPD_LAST_DRAW
+    if EPD is None:
+        return
+
+    now = time.time()
+    if now - EPD_LAST_DRAW < EPD_MIN_INTERVAL:
+        return
+    EPD_LAST_DRAW = now
+
+    with EPD_LOCK:
+        try:
+            w, h = EPD.height, EPD.width
+            img = Image.new("1", (w, h), 255)
+            draw = ImageDraw.Draw(img)
+
+            # Build one message string from the three fields
+            parts = [status.strip()] if status else []
+            body = " ".join([s.strip() for s in [line1, line2] if s and s.strip()])
+            if body:
+                parts.append(body)
+            full_text = "\n".join(parts)
+
+            # Margins
+            pad_x = 8
+            pad_y = 6
+            max_w = w - 2 * pad_x
+            max_h = h - 2 * pad_y
+            line_spacing = 4
+
+            # Try large, then medium, then small until it fits vertically
+            for font in (EPD_FONT_LARGE, EPD_FONT_MED, EPD_FONT_SMALL):
+                # Wrap each paragraph separately so status stays “as a line”
+                lines = []
+                if parts:
+                    # First line = status (no wrap unless too wide, then wrap it too)
+                    status_lines = _wrap_pixels(draw, parts[0], font, max_w) or [parts[0]]
+                    lines.extend(status_lines)
+
+                if len(parts) > 1:
+                    body_lines = _wrap_pixels(draw, parts[1], font, max_w)
+                    lines.extend(body_lines)
+
+                if _fit_lines_for_font(draw, lines, font, max_h, line_spacing):
+                    chosen_font = font
+                    chosen_lines = lines
+                    break
+            else:
+                # If nothing fits, force small and truncate
+                chosen_font = EPD_FONT_SMALL
+                chosen_lines = _wrap_pixels(draw, full_text.replace("\n", " "), chosen_font, max_w)
+
+            # If still too many lines, truncate and add ellipsis
+            lh = _line_h(draw, chosen_font)
+            max_lines = max(1, (max_h + line_spacing) // (lh + line_spacing))
+            if len(chosen_lines) > max_lines:
+                chosen_lines = chosen_lines[:max_lines]
+                # add ellipsis on last line if needed
+                if len(chosen_lines[-1]) > 3:
+                    chosen_lines[-1] = chosen_lines[-1][:-3] + "..."
+
+            # Vertical centering
+            total_h = len(chosen_lines) * lh + max(0, len(chosen_lines) - 1) * line_spacing
+            y = pad_y + (max_h - total_h) // 2
+
+            # Draw each line centered horizontally
+            for line in chosen_lines:
+                line_w = _text_w(draw, line, chosen_font)
+                x = pad_x + (max_w - line_w) // 2
+                draw.text((x, y), line, font=chosen_font, fill=0)
+                y += lh + line_spacing
+
+            EPD.display(EPD.getbuffer(img))
+
+        except Exception as e:
+            print(f"❌ E-ink draw failed: {e}")
+
+# ================================================================
 #  MAIN LOOP + EMOTION PROCESSING
 # ================================================================
-
 def update_listen_led_state():
     """
     LED logic (non-blinking decisions):
@@ -904,14 +1137,10 @@ def main():
     clear_mouth()
 
     print("🤖 Animatronic Chatbot Ready.")
+    epd_init()
 
-    # If we're in an interactive terminal, ask for ENTER.
-    # If running under systemd/cron (no TTY), skip the prompt.
-    if sys.stdin.isatty():
-        input("Press ENTER to begin...")
-    else:
-        # Optional: small delay so you can see logs if run manually as a service
-        time.sleep(1)
+    # Small delay so hardware can settle, then start immediately
+    time.sleep(1)
 
     # Start background threads
     eye_thread = threading.Thread(target=eyes_idle_loop)
@@ -930,32 +1159,51 @@ def main():
     button_on = not listen_button.value
     is_armed = button_on
     last_armed = button_on
+    thread = None
 
     try:
-        while True:
-            # Update is_armed based on button
-            button_on = not listen_button.value
-            is_armed = button_on
+        while is_running:
+            # Read current button state (False = physical press, True = released)
+            button_on = not listen_button.value   # True when latched/ON
 
-            # Only move eyelids when the state changes AFTER startup
+            # Detect edge: state change
             if button_on != last_armed:
                 if button_on:
-                    set_eyelids_open()    # waking up
+                    # OFF → ON : wake up
+                    print("🔺 Button latched — waking up.")
+                    epd_show_status("  Waking up", "")
+                    is_armed = True
+                    is_thinking = False
+                    set_eyelids_open()
+                    clear_mouth()
                 else:
-                    set_eyelids_closed()  # going to sleep
+                    # ON → OFF : go to sleep (but keep program running)
+                    print("🔻 Button unlatched — going to sleep.")
+                    epd_show_status("  Going to sleep", "")
+                    is_armed = False
+                    is_thinking = False
+                    is_speaking = False
+                    clear_mouth()
+                    set_eyelids_closed()
                 last_armed = button_on
 
-            # Update LED based on current state
+            # Keep LED in sync with current state
             update_listen_led_state()
 
-            # If switch is OFF: don't listen, just idle/sleep
-            if not button_on:
-                is_thinking = False
+            # If not armed (switch OFF), just idle and wait for re-latch
+            if not is_armed:
                 time.sleep(0.05)
                 continue
 
-            # Switch is ON: listen once
+            # ----------------------------------------------------
+            # From here down: normal “armed” behavior (unchanged)
+            # ----------------------------------------------------
             print("🎤 Listening for speech...")
+            epd_show_status("  Listening", "  Say something...", "")
+
+            if button_is_off():
+                continue
+
             audio_path = record_audio()
 
             # If recording was cancelled (button turned off or no audio), skip this turn
@@ -963,10 +1211,17 @@ def main():
                 is_thinking = False
                 continue
 
+            if button_is_off():
+                is_thinking = False
+                continue
+
             is_thinking = True
+            epd_show_status("  Transcribing...", "")
+
             user_text = transcribe_audio(audio_path)
 
             print(f"🧑 You said: {user_text}")
+            epd_show_status("  You said: ", user_text, "")
 
             os.remove(audio_path)
 
@@ -974,20 +1229,22 @@ def main():
             if not user_text or not user_text.strip():
                 print("⚠️ Nothing clear was transcribed; not sending to OpenAI.")
                 is_thinking = False
-                time.sleep(0.5)   # small pause so it doesn't spin too fast
+                time.sleep(0.5)
                 continue
 
-            norm = user_text.lower().strip()
+            import string
 
-            # 2️⃣ Exit commands (must work even if short)
-            if norm in ["quit", "exit", "stop"]:
+            norm = user_text.lower().strip()
+            norm = norm.translate(str.maketrans("", "", string.punctuation))  # remove .,!?
+            first = norm.split()[0] if norm.split() else ""
+
+            if first in {"quit", "exit", "stop"}:
+                print("👋 Goodbye command received.")
                 is_running = False
-                pca.deinit()
-                clear_mouth()
-                print("👋 Goodbye.")
+                is_armed = False
                 break
 
-            # 3️⃣ Easter eggs (also allowed even if short-ish)
+            # 3️⃣ Easter eggs
             if "wink for me" in norm or norm.startswith("wink") or "can you wink" in norm:
                 is_thinking = False
                 print("✨ Easter Egg: wink")
@@ -1010,29 +1267,48 @@ def main():
             # ----------------------------------------------
             # Normal conversation
             # ----------------------------------------------
+             # Initialize thread variable - will be created on first use
+
+
             print("🤔 Thinking...")
+            epd_show_status("  Thinking...", "")
+
+            if button_is_off():
+                is_thinking = False
+                continue
 
             try:
-                response = client.chat.completions.create(
+                completion = client.chat.completions.create(
                     model=CHAT_MODEL,
                     messages=[
-                        {"role": "system", "content": (
-                            "You are a calm, expressive AI. "
-                            "Respond concisely in 1 sentence unless necessary. "
-                            "Do NOT start with greetings like 'Hello', 'Hi', or 'How can I help you today?'. "
-                            "Just answer the user's request directly. "
-                            "Also output emotion as one of: happy, sad, neutral, angry, surprised. "
-                            "Format: <text> [emotion: <label>]"
-                        )},
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a calm, expressive AI. "
+                                "Respond concisely in 1 sentence unless necessary. "
+                                "Do NOT start with greetings like 'Hello', 'Hi', or 'How can I help you today?'. "
+                                "Just answer the user's request directly. "
+                                "Also output emotion as one of: happy, sad, neutral, angry, surprised. "
+                                "Format: <text> [emotion: <label>]"
+                            ),
+                        },
                         {"role": "user", "content": user_text},
-                    ]
+                    ],
                 )
+
+                # Extract the text content for downstream emotion parsing
+                response = completion.choices[0].message.content
+
+                if button_is_off():
+                    is_thinking = False
+                    continue
+
                 global is_offline
                 is_offline = False
 
+
             except APIConnectionError:
                 print("❌ No internet: cannot reach OpenAI for chat completion. Check Wi-Fi.")
-                # Optional visual feedback
                 set_offline_face()
                 for _ in range(3):
                     show_mouth(1.0, color=(255, 0, 0))
@@ -1040,41 +1316,69 @@ def main():
                     clear_mouth()
                     time.sleep(0.25)
                 is_thinking = False
-                continue  # skip this turn and go back to waiting for the next question
+                continue
 
-            # ----------------------------------------------
-            # Handle model response + emotion
-            # ----------------------------------------------
-            full_reply = response.choices[0].message.content.strip()
+            full_reply = response.strip()
 
-            # Extract emotion
             match = re.search(r"\[emotion:\s*(\w+)\]", full_reply, re.IGNORECASE)
             emotion = match.group(1).lower() if match else "neutral"
 
-            # Strip label before TTS
             reply_text = re.sub(r"\[emotion:.*\]", "", full_reply).strip()
 
             EMOTION_COLORS = {
-                "happy": (0, 255, 255),      # yellow-ish
-                "sad": (255, 0, 0),          # blue
-                "angry": (0, 255, 0),        # red
-                "surprised": (255, 255, 0),  # purple
-                "neutral": (0, 255, 0),      # default green
+                "happy": (0, 255, 255),
+                "sad": (255, 0, 0),
+                "angry": (0, 255, 0),
+                "surprised": (255, 255, 0),
+                "neutral": (0, 255, 0),
             }
 
             color = EMOTION_COLORS.get(emotion, (0, 255, 0))
 
             is_thinking = False
 
+            if button_is_off():
+                is_thinking = False
+                continue
+
             print(f"🤖 {reply_text}  [{emotion}]")
             speak_text(reply_text, color=color)
 
+
     except KeyboardInterrupt:
+        print("\n👋 Program interrupted from keyboard.")
         is_running = False
-        pca.deinit()
-        clear_mouth()
-        print("\n👋 Program stopped.")
+        is_armed = False
+
+    finally:
+        # Global shutdown cleanup
+        is_running = False
+        is_armed = False
+
+        try:
+            listen_led.value = False
+        except Exception:
+            pass
+
+        try:
+            clear_mouth()
+        except Exception:
+            pass
+
+        try:
+            set_eyelids_closed()
+        except Exception:
+            pass
+
+        try:
+            pca.deinit()
+        except Exception:
+            pass
+
+        print("🔌 Chatbot shut down cleanly.")
+
 
 
 if __name__ == "__main__":
     main()
+

@@ -1,538 +1,750 @@
-{\rtf1\ansi\ansicpg1252\cocoartf2822
-\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
-{\colortbl;\red255\green255\blue255;}
-{\*\expandedcolortbl;;}
-\margl1440\margr1440\vieww11520\viewh8400\viewkind0
-\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+import os
+import time
+import random
+import threading
+import wave
+import subprocess
+import re
+import string
+import math
+import struct
 
-\f0\fs24 \cf0 #!/usr/bin/env python3\
-import os\
-import time\
-import threading\
-import wave\
-import pyaudio\
-import audioop\
-import subprocess\
-import re\
-import digitalio\
-import sys\
-\
-from dotenv import load_dotenv\
-load_dotenv()\
-\
-from openai import OpenAI, APIConnectionError\
-import board\
-\
-# ================================================================\
-#  OPENAI CONFIGURATION\
-# ================================================================\
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))\
-\
-CHAT_MODEL = "gpt-4.1-mini"\
-TTS_MODEL = "gpt-4o-mini-tts"\
-VOICE_NAME = "echo"\
-\
-# ================================================================\
-#  GLOBAL STATE\
-# ================================================================\
-is_running = True\
-is_speaking = False\
-is_thinking = False\
-is_armed = False      # True when listening is enabled\
-is_offline = False    # True when OpenAI can't be reached\
-\
-# ================================================================\
-#  BUTTON + LED CONFIGURATION (same as your existing wiring)\
-# ================================================================\
-# GPIO22 for button, GPIO23 for LED\
-BUTTON_PIN = board.D22      # Physical pin 15\
-LISTEN_LED_PIN = board.D23  # Physical pin 16\
-\
-# Button: input with pull-up, pressed/latched to GND = False\
-listen_button = digitalio.DigitalInOut(BUTTON_PIN)\
-listen_button.direction = digitalio.Direction.INPUT\
-listen_button.pull = digitalio.Pull.UP  # not pressed = True, pressed/latched = False\
-\
-# LED: output, off by default\
-listen_led = digitalio.DigitalInOut(LISTEN_LED_PIN)\
-listen_led.direction = digitalio.Direction.OUTPUT\
-listen_led.value = False\
-\
-# ================================================================\
-#  AUDIO DEVICE DISCOVERY\
-# ================================================================\
-def find_audio_devices():\
-    """\
-    Find a USB microphone and USB speaker (or any reasonable input/output).\
-    Returns (input_index, output_index).\
-    """\
-    p = pyaudio.PyAudio()\
-    input_index = None\
-    output_index = None\
-\
-    for i in range(p.get_device_count()):\
-        info = p.get_device_info_by_index(i)\
-        name = info.get("name", "").lower()\
-\
-        # Input: any device with input channels, prefer USB mic\
-        if input_index is None and info.get("maxInputChannels") > 0:\
-            if "usb" in name or "mic" in name or "microphone" in name:\
-                input_index = i\
-\
-        # Output: any device with output channels, prefer USB speaker/audio\
-        if output_index is None and info.get("maxOutputChannels") > 0:\
-            if "usb" in name or "audio" in name or "speaker" in name:\
-                output_index = i\
-\
-    p.terminate()\
-    return input_index, output_index\
-\
-# ================================================================\
-#  NOISE / GARBAGE FILTER FOR TEXT\
-# ================================================================\
-def is_meaningful_text(text: str) -> bool:\
-    """\
-    Heuristic filter to ignore background noise / nonsense.\
-    Allows specific short commands like 'stop', 'exit', 'quit'.\
-    """\
-    if not text:\
-        return False\
-\
-    t = text.strip().lower()\
-\
-    # Always allow these short commands\
-    ALWAYS_ALLOW = \{"stop", "exit", "quit"\}\
-    if t in ALWAYS_ALLOW:\
-        return True\
-\
-    # Too short overall (e.g., "uh", "ok")\
-    if len(t) < 5:\
-        return False\
-\
-    # Very few alphabetic characters (mostly symbols / numbers)\
-    letters = sum(1 for c in t if c.isalpha())\
-    non_space = sum(1 for c in t if not c.isspace())\
-    if non_space > 0 and letters / non_space < 0.5:\
-        return False\
-\
-    # If there are no vowels, it's probably not real speech\
-    if not any(ch in "aeiou" for ch in t):\
-        return False\
-\
-    # Junk filler patterns\
-    NOISE_PATTERNS = \{"uh", "umm", "mm", "hmm"\}\
-    if t in NOISE_PATTERNS:\
-        return False\
-\
-    return True\
-\
-# ================================================================\
-#  TRANSCRIPTION (WHISPER)\
-# ================================================================\
-def transcribe_audio(filename: str) -> str:\
-    """Use Whisper API to convert audio to text."""\
-    global is_offline\
-    print("\uc0\u55358 \u56800  Transcribing...")\
-\
-    try:\
-        with open(filename, "rb") as audio_file:\
-            result = client.audio.transcriptions.create(\
-                model="whisper-1",\
-                file=audio_file\
-            )\
-        is_offline = False\
-        return result.text.strip()\
-    except APIConnectionError:\
-        print("\uc0\u10060  No internet: cannot reach OpenAI for transcription. Check Wi-Fi.")\
-        is_offline = True\
-        return ""\
-    except Exception as e:\
-        print(f"\uc0\u9888 \u65039  Transcription error: \{e\}")\
-        return ""\
-\
-# ================================================================\
-#  AUDIO RECORDING (VOICE-ACTIVATED)\
-# ================================================================\
-def record_audio(\
-    filename: str = "input.wav",\
-    threshold: int = 2400,\
-    silence_duration: float = 0.6,\
-    max_duration: float = 20.0,\
-):\
-    """\
-    Voice-activated audio recorder:\
-      - Starts when RMS > threshold\
-      - Stops when RMS < threshold for silence_duration seconds\
-      - Aborts immediately if the listen button is turned OFF\
-    """\
-    global is_armed\
-\
-    audio_interface = pyaudio.PyAudio()\
-    RATE = 44100\
-    CHUNK = 1024\
-\
-    input_index, _ = find_audio_devices()\
-    if input_index is None:\
-        print("\uc0\u10060  No microphone found.")\
-        return None\
-\
-    print(f"\uc0\u55356 \u57252  Using input device index \{input_index\}")\
-\
-    stream = audio_interface.open(\
-        format=pyaudio.paInt16,\
-        channels=1,\
-        rate=RATE,\
-        input=True,\
-        frames_per_buffer=CHUNK,\
-        input_device_index=input_index,\
-    )\
-\
-    print("\uc0\u55357 \u56386  Waiting for speech...")\
-\
-    frames = []\
-    recording_started = False\
-    silence_start = None\
-    start_time = time.time()\
-\
-    try:\
-        while True:\
-            # If button is OFF, abort immediately\
-            button_on = not listen_button.value  # True when latched ON\
-            if not button_on:\
-                print("\uc0\u55357 \u57041  Button turned OFF \'97 cancelling recording.")\
-                is_armed = False\
-                break\
-\
-            # Time limit safety\
-            if time.time() - start_time > max_duration:\
-                print("\uc0\u9201 \u65039  Max recording duration reached.")\
-                break\
-\
-            data = stream.read(CHUNK, exception_on_overflow=False)\
-            rms = audioop.rms(data, 2)\
-\
-            if not recording_started:\
-                # Wait for speech above noise floor\
-                if rms >= threshold:\
-                    print("\uc0\u55356 \u57241 \u65039  Recording started!")\
-                    recording_started = True\
-                    frames.append(data)\
-                continue\
-\
-            # Once recording has started:\
-            frames.append(data)\
-\
-            # Detect silence\
-            if rms < threshold:\
-                if silence_start is None:\
-                    silence_start = time.time()\
-                elif time.time() - silence_start >= silence_duration:\
-                    print("\uc0\u55357 \u57041  Silence detected \'97 stopping.")\
-                    break\
-            else:\
-                silence_start = None\
-\
-    except KeyboardInterrupt:\
-        print("\\n\uc0\u55357 \u57041  Recording interrupted from keyboard.")\
-    except Exception as e:\
-        print(f"\uc0\u9888 \u65039  Recording error: \{e\}")\
-    finally:\
-        print("\uc0\u55357 \u57041  Finished recording.")\
-        stream.stop_stream()\
-        stream.close()\
-        audio_interface.terminate()\
-\
-    if not frames:\
-        print("\uc0\u9888 \u65039  No audio captured.")\
-        return None\
-\
-    with wave.open(filename, 'wb') as wf:\
-        wf.setnchannels(1)\
-        wf.setsampwidth(audio_interface.get_sample_size(pyaudio.paInt16))\
-        wf.setframerate(RATE)\
-        wf.writeframes(b"".join(frames))\
-\
-    return filename\
-\
-# ================================================================\
-#  TTS + PLAYBACK (NO MOUTH / SERVOS)\
-# ================================================================\
-def speak_text(text: str):\
-    """Speak via TTS. Button OFF will abort speech and stop listening."""\
-    global is_speaking, is_armed, is_offline\
-\
-    if not text:\
-        return\
-\
-    is_speaking = True\
-    mp3_path = "speech_output.mp3"\
-    wav_path = "speech_output.wav"\
-\
-    # Generate TTS to MP3\
-    try:\
-        with client.audio.speech.with_streaming_response.create(\
-            model=TTS_MODEL,\
-            voice=VOICE_NAME,\
-            input=text,\
-        ) as response:\
-            response.stream_to_file(mp3_path)\
-        is_offline = False\
-    except APIConnectionError:\
-        print("\uc0\u10060  No internet: cannot reach OpenAI for TTS. Check Wi-Fi.")\
-        is_offline = True\
-        is_speaking = False\
-        return\
-    except Exception as e:\
-        print(f"\uc0\u9888 \u65039  TTS error: \{e\}")\
-        is_speaking = False\
-        return\
-\
-    # Convert MP3 to WAV using ffmpeg for easier playback via PyAudio\
-    try:\
-        subprocess.run(\
-            ["ffmpeg", "-y", "-i", mp3_path, "-ac", "1", "-ar", "48000", wav_path],\
-            stdout=subprocess.DEVNULL,\
-            stderr=subprocess.DEVNULL,\
-            check=True,\
-        )\
-    except Exception as e:\
-        print(f"\uc0\u9888 \u65039  ffmpeg conversion error: \{e\}")\
-        is_speaking = False\
-        return\
-\
-    try:\
-        wave_file = wave.open(wav_path, 'rb')\
-        audio_interface = pyaudio.PyAudio()\
-\
-        _, output_index = find_audio_devices()\
-        if output_index is None:\
-            print("\uc0\u10060  No speaker found.")\
-            wave_file.close()\
-            audio_interface.terminate()\
-            is_speaking = False\
-            return\
-\
-        print(f"\uc0\u55357 \u56586  Using output device index \{output_index\}")\
-\
-        output_stream = audio_interface.open(\
-            format=audio_interface.get_format_from_width(wave_file.getsampwidth()),\
-            channels=wave_file.getnchannels(),\
-            rate=wave_file.getframerate(),\
-            output=True,\
-            output_device_index=output_index,\
-        )\
-\
-        chunk_size = 1024\
-        data = wave_file.readframes(chunk_size)\
-\
-        while data:\
-            # If button turned OFF while speaking, abort and stop listening\
-            button_on = not listen_button.value  # True when latched ON\
-            if not button_on:\
-                print("\uc0\u55357 \u56597  Button turned OFF \'97 stopping speech and listening.")\
-                is_armed = False\
-                break\
-\
-            output_stream.write(data)\
-            data = wave_file.readframes(chunk_size)\
-\
-        output_stream.stop_stream()\
-        output_stream.close()\
-        audio_interface.terminate()\
-        wave_file.close()\
-\
-    except Exception as e:\
-        print(f"\uc0\u9888 \u65039  Playback error: \{e\}")\
-\
-    # Clean up files\
-    if os.path.exists(mp3_path):\
-        os.remove(mp3_path)\
-    if os.path.exists(wav_path):\
-        os.remove(wav_path)\
-\
-    is_speaking = False\
-\
-# ================================================================\
-#  LED STATE\
-# ================================================================\
-def update_listen_led_state():\
-    """\
-    Simple LED logic:\
-      - OFF when not armed\
-      - ON when ready / thinking / speaking\
-    """\
-    global listen_led, is_armed\
-\
-    listen_led.value = bool(is_armed)\
-\
-# ================================================================\
-#  MAIN LOOP\
-# ================================================================\
-def main():\
-    global is_running, is_thinking, is_armed\
-\
-    print("\uc0\u55358 \u56800  Simple Chatbot (no servos, no NeoPixels) ready.")\
-    time.sleep(1.0)\
-\
-    # Initialize armed state based on current button\
-    button_on = not listen_button.value  # True when latched ON\
-    is_armed = button_on\
-    last_armed = button_on\
-    update_listen_led_state()\
-\
-    if is_armed:\
-        try:\
-            speak_text("I'm ready. Ask me a question.")\
-        except Exception:\
-            pass\
-\
-    try:\
-        while is_running:\
-            # Poll button\
-            button_on = not listen_button.value  # True when latched ON\
-\
-            # Edge detect\
-            if button_on != last_armed:\
-                if button_on:\
-                    print("\uc0\u55357 \u56634  Button latched ON \'97 listening enabled.")\
-                    is_armed = True\
-                    try:\
-                        speak_text("Okay, I'm listening.")\
-                    except Exception:\
-                        pass\
-                else:\
-                    print("\uc0\u55357 \u56635  Button switched OFF \'97 stopping listening.")\
-                    is_armed = False\
-                last_armed = button_on\
-\
-            update_listen_led_state()\
-\
-            # If not armed, just idle\
-            if not is_armed:\
-                time.sleep(0.05)\
-                continue\
-\
-            # ====================================================\
-            #  LISTEN\
-            # ====================================================\
-            print("\uc0\u55356 \u57252  Listening for speech...")\
-            audio_path = record_audio()\
-\
-            if audio_path is None:\
-                # Maybe button OFF or no audio; loop again\
-                continue\
-\
-            is_thinking = True\
-            update_listen_led_state()\
-\
-            user_text = transcribe_audio(audio_path)\
-            try:\
-                os.remove(audio_path)\
-            except Exception:\
-                pass\
-\
-            is_thinking = False\
-            update_listen_led_state()\
-\
-            if not user_text:\
-                print("\uc0\u9888 \u65039  Empty transcription.")\
-                time.sleep(0.3)\
-                continue\
-\
-            print(f"\uc0\u55358 \u56785  You said: \{user_text\}")\
-\
-            norm = user_text.lower().strip()\
-\
-            # Voice commands to stop/shutdown\
-            if norm in \{"stop", "exit", "quit"\}:\
-                print("\uc0\u55357 \u57041  Stop command received \'97 shutting down.")\
-                speak_text("Okay, stopping now.")\
-                is_running = False\
-                break\
-\
-            # Ignore noisy / meaningless input\
-            if not is_meaningful_text(user_text):\
-                print("\uc0\u9888 \u65039  Transcription looks like noise; ignoring.")\
-                time.sleep(0.5)\
-                continue\
-\
-            # ====================================================\
-            #  CHAT COMPLETION\
-            # ====================================================\
-            print("\uc0\u55358 \u56596  Thinking...")\
-\
-            try:\
-                response = client.chat.completions.create(\
-                    model=CHAT_MODEL,\
-                    messages=[\
-                        \{\
-                            "role": "system",\
-                            "content": (\
-                                "You are a calm, expressive AI assistant. "\
-                                "Respond concisely in 1 sentence unless more detail is truly necessary. "\
-                                "Do NOT start with greetings like 'Hello', 'Hi', or 'How can I help you today?'. "\
-                                "Just answer the user's request directly. "\
-                                "Also output emotion as one of: happy, sad, neutral, angry, surprised. "\
-                                "Format: <text> [emotion: <label>]"\
-                            ),\
-                        \},\
-                        \{"role": "user", "content": user_text\},\
-                    ],\
-                )\
-                is_offline = False\
-            except APIConnectionError:\
-                print("\uc0\u10060  No internet: cannot reach OpenAI for chat completion. Check Wi-Fi.")\
-                is_offline = True\
-                try:\
-                    speak_text("I can't reach the internet right now.")\
-                except Exception:\
-                    pass\
-                continue\
-            except Exception as e:\
-                print(f"\uc0\u9888 \u65039  Chat completion error: \{e\}")\
-                continue\
-\
-            full_reply = response.choices[0].message.content.strip()\
-\
-            # Extract emotion tag\
-            match = re.search(r"\\[emotion:\\s*(\\w+)\\]", full_reply, re.IGNORECASE)\
-            emotion = match.group(1).lower() if match else "neutral"\
-\
-            # Remove emotion tag from spoken text\
-            reply_text = re.sub(r"\\[emotion:.*\\]", "", full_reply).strip()\
-\
-            print(f"\uc0\u55358 \u56598  \{reply_text\}  [\{emotion\}]")\
-            speak_text(reply_text)\
-\
-            # Loop back for the next turn\
-\
-    except KeyboardInterrupt:\
-        print("\\n\uc0\u55357 \u56395  Program interrupted from keyboard.")\
-        is_running = False\
-\
-    finally:\
-        # Global shutdown cleanup\
-        print("\uc0\u55357 \u56635  Shutting down...")\
-        is_running = False\
-        is_armed = False\
-\
-        try:\
-            listen_led.value = False\
-        except Exception:\
-            pass\
-\
-        try:\
-            listen_button.deinit()\
-        except Exception:\
-            pass\
-\
-        try:\
-            listen_led.deinit()\
-        except Exception:\
-            pass\
-\
-        print("\uc0\u55357 \u56588  Chatbot shut down cleanly.")\
-\
-if __name__ == "__main__":\
-    main()\
-}
+import pyaudio
+import digitalio
+from PIL import ImageFont  # (only used to measure fonts? Not needed now; kept minimal)
+
+import os
+os.environ.setdefault("SDL_VIDEODRIVER", "fbcon")
+os.environ.setdefault("SDL_FBDEV", "/dev/fb0")
+
+import pygame
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from openai import OpenAI, APIConnectionError
+
+import board
+
+# ================================================================
+#  PLATFORM SELECTION
+# ================================================================
+# Set this True on Raspberry Pi 5. False for Pi 4.
+USE_PI5 = True
+
+# ================================================================
+#  OPENAI CONFIGURATION
+# ================================================================
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+CHAT_MODEL = "gpt-4.1-mini"
+TTS_MODEL = "gpt-4o-mini-tts"
+VOICE_NAME = "echo"
+
+# ================================================================
+#  UI (FREENOVE 4.3" DSI Touchscreen) via pygame
+# ================================================================
+class TouchUI:
+    """
+    Full-screen status display for the DSI touchscreen.
+    Shows:
+      - a big status line
+      - a wrapped body text line(s)
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.status = "Starting..."
+        self.body = ""
+        self.running = True
+
+        # pygame needs a DISPLAY. Make sure you run from the desktop session
+        # (or have a framebuffer/SDL env configured).
+        pygame.init()
+
+        # Make video init explicit (fbcon can be picky)
+        pygame.display.init()
+        if not pygame.display.get_init():
+            raise RuntimeError("pygame display failed to initialize (check SDL_VIDEODRIVER/SDL_FBDEV)")
+
+        # Create the screen first, then touch mouse/keyboard APIs
+        self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        pygame.mouse.set_visible(False)
+
+        pygame.display.set_caption("SimpleChatbot")
+
+        self.w, self.h = self.screen.get_size()
+
+        # Font sizes tuned for ~4.3" 480x800-ish screens
+        self.font_status = pygame.font.SysFont(None, 54)
+        self.font_body = pygame.font.SysFont(None, 40)
+        self.font_small = pygame.font.SysFont(None, 32)
+
+        self.bg = (0, 0, 0)
+        self.fg = (255, 255, 255)
+        self.dim = (180, 180, 180)
+
+    def set(self, status: str, body: str = ""):
+        with self._lock:
+            self.status = (status or "").strip()
+            self.body = (body or "").strip()
+
+    def stop(self):
+        self.running = False
+
+    def _wrap_text(self, text, font, max_width):
+        if not text:
+            return []
+        words = text.split()
+        lines = []
+        cur = ""
+        for w in words:
+            test = (cur + " " + w).strip()
+            if font.size(test)[0] <= max_width:
+                cur = test
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def loop(self):
+        clock = pygame.time.Clock()
+        padding = 24
+
+        while self.running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                elif event.type == pygame.KEYDOWN:
+                    # ESC quits UI (optional)
+                    if event.key == pygame.K_ESCAPE:
+                        self.running = False
+
+            with self._lock:
+                status = self.status
+                body = self.body
+
+            self.screen.fill(self.bg)
+
+            max_w = self.w - 2 * padding
+
+            # Wrap body
+            body_lines = self._wrap_text(body, self.font_body, max_w)
+
+            # Render status (single line; if too long, fall back to smaller)
+            status_font = self.font_status if self.font_status.size(status)[0] <= max_w else self.font_body
+            status_surf = status_font.render(status, True, self.fg)
+
+            # Compute vertical centering
+            line_gap = 12
+            body_surfs = [self.font_body.render(line, True, self.dim) for line in body_lines[:6]]
+
+            total_h = status_surf.get_height()
+            if body_surfs:
+                total_h += line_gap + sum(s.get_height() for s in body_surfs) + line_gap * (len(body_surfs) - 1)
+
+            y = (self.h - total_h) // 2
+
+            # Draw status centered
+            x = (self.w - status_surf.get_width()) // 2
+            self.screen.blit(status_surf, (x, y))
+            y += status_surf.get_height() + line_gap
+
+            # Draw body lines centered
+            for s in body_surfs:
+                x = (self.w - s.get_width()) // 2
+                self.screen.blit(s, (x, y))
+                y += s.get_height() + line_gap
+
+            pygame.display.flip()
+            clock.tick(30)
+
+        pygame.quit()
+
+
+# ================================================================
+#  AUDIO DEVICE CONFIGURATION
+# ================================================================
+IDLE_PHRASES = [
+    "Ready when you are.",
+    "Anything I can help with?",
+    "I'm here whenever you need me.",
+    "Just say the word.",
+    "How can I help?",
+]
+
+def find_audio_devices():
+    p = pyaudio.PyAudio()
+    input_index = None
+    output_index = None
+
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        name = info.get("name", "").lower()
+
+        if input_index is None and info.get("maxInputChannels") > 0:
+            if "usb" in name or "mic" in name or "microphone" in name:
+                input_index = i
+
+        if output_index is None and info.get("maxOutputChannels") > 0:
+            if "usb" in name or "audio" in name or "speaker" in name:
+                output_index = i
+
+    p.terminate()
+    return input_index, output_index
+
+# ================================================================
+#  GLOBAL STATE FLAGS
+# ================================================================
+is_running = True
+is_speaking = False
+is_thinking = False
+is_armed = False
+is_offline = False
+
+# Mouth smoothing factor
+MOUTH_SMOOTHING = 0.6
+previous_audio_level = 0.0
+
+# ================================================================
+#  NEOPIXEL MOUTH CONFIGURATION (Pi 4 / Pi 5)
+# ================================================================
+NEOPIXEL_PIN = board.D13
+NUM_PIXELS = 8
+
+if USE_PI5:
+    import adafruit_pixelbuf
+    from adafruit_raspberry_pi5_neopixel_write import neopixel_write
+
+    class Pi5PixelBuf(adafruit_pixelbuf.PixelBuf):
+        def __init__(self, pin, size, **kwargs):
+            self._pin = pin
+            super().__init__(size=size, **kwargs)
+        def _transmit(self, buf):
+            neopixel_write(self._pin, buf)
+
+    pixels = Pi5PixelBuf(
+        NEOPIXEL_PIN,
+        NUM_PIXELS,
+        auto_write=True,
+        byteorder="BRG",
+    )
+else:
+    import neopixel
+    pixels = neopixel.NeoPixel(
+        NEOPIXEL_PIN,
+        NUM_PIXELS,
+        auto_write=True,
+        pixel_order=neopixel.GRB,
+    )
+
+def show_mouth(amplitude, color=(255, 255, 255)):
+    amplitude = max(0.0, min(1.0, amplitude))
+    num_lit = int(round(amplitude * NUM_PIXELS))
+
+    pixels.fill((0, 0, 0))
+    center_left = NUM_PIXELS // 2 - 1
+    center_right = NUM_PIXELS // 2
+
+    for i in range(num_lit // 2):
+        left_pos = center_left - i
+        right_pos = center_right + i
+        if 0 <= left_pos < NUM_PIXELS:
+            pixels[left_pos] = color
+        if 0 <= right_pos < NUM_PIXELS:
+            pixels[right_pos] = color
+
+    pixels.show()
+
+def clear_mouth():
+    pixels.fill((0, 0, 0))
+    pixels.show()
+
+# ================================================================
+#  LISTEN BUTTON + LED CONFIGURATION
+# ================================================================
+BUTTON_PIN = board.D22       # Physical pin 15
+LISTEN_LED_PIN = board.D23   # Physical pin 16
+
+listen_button = digitalio.DigitalInOut(BUTTON_PIN)
+listen_button.direction = digitalio.Direction.INPUT
+listen_button.pull = digitalio.Pull.UP  # not pressed = True
+
+listen_led = digitalio.DigitalInOut(LISTEN_LED_PIN)
+listen_led.direction = digitalio.Direction.OUTPUT
+listen_led.value = False
+
+def button_is_off() -> bool:
+    return listen_button.value  # True means OFF (pull-up)
+
+def update_listen_led_state():
+    global is_armed, is_thinking, is_speaking
+    if not is_armed:
+        listen_led.value = False
+    elif not (is_thinking or is_speaking):
+        listen_led.value = True
+
+def led_blink_loop():
+    global is_running, is_thinking, is_speaking, is_armed
+    while is_running:
+        if not is_armed:
+            listen_led.value = False
+            time.sleep(0.1)
+            continue
+        if is_thinking or is_speaking:
+            listen_led.value = True
+            time.sleep(0.3)
+            listen_led.value = False
+            time.sleep(0.3)
+            continue
+        listen_led.value = True
+        time.sleep(0.1)
+
+def idle_speech_loop(ui: TouchUI):
+    global is_running, is_speaking, is_thinking, is_armed
+    last_spoke_time = time.time()
+    IDLE_INTERVAL = 90
+    while is_running:
+        time.sleep(1)
+        if not is_armed or is_thinking or is_speaking:
+            last_spoke_time = time.time()
+            continue
+        if time.time() - last_spoke_time > IDLE_INTERVAL:
+            phrase = random.choice(IDLE_PHRASES)
+            speak_text(ui, phrase, color=(0, 255, 0))
+            last_spoke_time = time.time()
+
+# ================================================================
+#  AUDIO HELPERS (no audioop)
+# ================================================================
+def rms_from_int16_bytes(data: bytes) -> float:
+    """
+    Compute RMS of 16-bit little-endian mono audio chunk.
+    Returns 0..1 float (roughly).
+    """
+    if not data:
+        return 0.0
+    count = len(data) // 2
+    if count == 0:
+        return 0.0
+    samples = struct.unpack("<" + "h" * count, data)
+    # RMS
+    mean_sq = sum((s * s) for s in samples) / count
+    rms = math.sqrt(mean_sq) / 32768.0
+    return max(0.0, min(1.0, rms))
+
+def curve_level(rms: float) -> float:
+    """
+    Map RMS (0..1) to a nicer mouth amplitude (0..1)
+    without numpy/log10. This saturates smoothly.
+    """
+    x = 55.0 * rms
+    return x / (1.0 + x)
+
+# ================================================================
+#  TRANSCRIPTION
+# ================================================================
+def transcribe_audio(ui: TouchUI, filename: str) -> str:
+    ui.set("Transcribing…", "")
+    try:
+        with open(filename, "rb") as audio_file:
+            result = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+        global is_offline
+        is_offline = False
+        return result.text.strip()
+    except APIConnectionError:
+        ui.set("No internet", "Check Wi-Fi (OpenAI unreachable)")
+        set_offline_visual()
+        return ""
+
+def is_meaningful_text(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip().lower()
+    if t in {"stop", "exit", "quit"}:
+        return True
+    if len(t) < 5:
+        return False
+    letters = sum(1 for c in t if c.isalpha())
+    non_space = sum(1 for c in t if not c.isspace())
+    if non_space > 0 and letters / non_space < 0.5:
+        return False
+    words = [w for w in re.split(r"\s+", t) if w]
+    if len(words) < 2:
+        return False
+    if not any(ch in "aeiou" for ch in t):
+        return False
+    if t in {"uh", "umm", "mm", "hmm"}:
+        return False
+    return True
+
+# ================================================================
+#  RECORDING
+# ================================================================
+def record_audio(
+    ui: TouchUI,
+    filename="input.wav",
+    threshold=0.055,            # RMS threshold (0..1)
+    silence_duration=0.6,
+    max_wait_for_speech=5.0,
+    max_record_seconds=12.0
+):
+    audio_interface = pyaudio.PyAudio()
+    RATE = 44100
+    CHUNK = 1024
+
+    input_index, _ = find_audio_devices()
+    if input_index is None:
+        ui.set("No microphone found", "Check USB mic")
+        return None
+
+    stream = audio_interface.open(
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=RATE,
+        input=True,
+        input_device_index=input_index,
+        frames_per_buffer=CHUNK
+    )
+
+    ui.set("Listening", "Say something…")
+    frames = []
+    recording_started = False
+    silence_start = None
+    start_time = time.time()
+
+    try:
+        while True:
+            if button_is_off():
+                ui.set("Button off", "Cancelling…")
+                break
+
+            if not recording_started and (time.time() - start_time) > max_wait_for_speech:
+                ui.set("No speech detected", "Timeout")
+                break
+
+            if recording_started and (time.time() - start_time) > max_record_seconds:
+                ui.set("Max recording length", "Stopping…")
+                break
+
+            update_listen_led_state()
+
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            rms = rms_from_int16_bytes(data)
+
+            if not recording_started:
+                if rms >= threshold:
+                    recording_started = True
+                    frames.append(data)
+                continue
+
+            frames.append(data)
+
+            if rms < threshold:
+                if silence_start is None:
+                    silence_start = time.time()
+                elif time.time() - silence_start >= silence_duration:
+                    break
+            else:
+                silence_start = None
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stream.stop_stream()
+        stream.close()
+        audio_interface.terminate()
+
+    if not frames:
+        return None
+
+    with wave.open(filename, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(audio_interface.get_sample_size(pyaudio.paInt16))
+        wf.setframerate(RATE)
+        wf.writeframes(b"".join(frames))
+
+    return filename
+
+# ================================================================
+#  OFFLINE VISUAL
+# ================================================================
+def set_offline_visual():
+    global is_offline, is_thinking, is_speaking
+    is_offline = True
+    is_thinking = False
+    is_speaking = False
+    for _ in range(3):
+        show_mouth(1.0, color=(255, 0, 0))
+        time.sleep(0.25)
+        clear_mouth()
+        time.sleep(0.25)
+
+# ================================================================
+#  TTS + MOUTH
+# ================================================================
+def speak_text(ui: TouchUI, text: str, color=(0, 255, 0)):
+    global is_speaking, previous_audio_level, is_offline, is_armed
+    is_speaking = True
+
+    mp3_path = "speech_output.mp3"
+    wav_path = "speech_output.wav"
+
+    ui.set("Speaking", text)
+
+    try:
+        with client.audio.speech.with_streaming_response.create(
+            model=TTS_MODEL,
+            voice=VOICE_NAME,
+            input=text
+        ) as response:
+            response.stream_to_file(mp3_path)
+        is_offline = False
+
+    except APIConnectionError:
+        ui.set("No internet", "TTS failed (OpenAI unreachable)")
+        set_offline_visual()
+        is_speaking = False
+        return
+
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", mp3_path, "-ac", "1", "-ar", "48000", wav_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    wave_file = wave.open(wav_path, "rb")
+    audio_interface = pyaudio.PyAudio()
+
+    _, output_index = find_audio_devices()
+    if output_index is None:
+        ui.set("No speaker found", "Check USB audio output")
+        is_speaking = False
+        wave_file.close()
+        audio_interface.terminate()
+        return
+
+    output_stream = audio_interface.open(
+        format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
+        channels=wave_file.getnchannels(),
+        rate=48000,
+        output=True,
+        output_device_index=output_index,
+    )
+
+    chunk_size = 512
+    audio_playback_delay = 0.07
+
+    data = wave_file.readframes(chunk_size)
+    playback_start_time = time.time() + audio_playback_delay
+
+    while data:
+        if is_armed and button_is_off():
+            break
+
+        update_listen_led_state()
+
+        rms = rms_from_int16_bytes(data)
+        level = curve_level(rms)
+
+        level = (
+            MOUTH_SMOOTHING * previous_audio_level +
+            (1 - MOUTH_SMOOTHING) * level
+        )
+        previous_audio_level = level
+
+        show_mouth(level, color=color)
+
+        while time.time() < playback_start_time:
+            pass
+
+        output_stream.write(data)
+        playback_start_time += chunk_size / wave_file.getframerate()
+        data = wave_file.readframes(chunk_size)
+
+    clear_mouth()
+    output_stream.stop_stream()
+    output_stream.close()
+    audio_interface.terminate()
+    wave_file.close()
+
+    for path in (mp3_path, wav_path):
+        if os.path.exists(path):
+            os.remove(path)
+
+    is_speaking = False
+
+# ================================================================
+#  MAIN
+# ================================================================
+def main():
+    global is_running, is_thinking, is_armed, is_speaking
+
+    clear_mouth()
+
+    ui = TouchUI()
+    ui_thread = threading.Thread(target=ui.loop, daemon=True)
+    ui_thread.start()
+
+    ui.set("Chatbot starting…", "")
+
+    time.sleep(0.5)
+
+    # Start background threads
+    threading.Thread(target=led_blink_loop, daemon=True).start()
+    threading.Thread(target=idle_speech_loop, args=(ui,), daemon=True).start()
+
+    # Startup announcement
+    speak_text(ui, "I'm ready. Press the button and ask me a question.", color=(0, 255, 0))
+
+    # Armed state
+    button_on = not button_is_off()
+    is_armed = button_on
+    last_armed = button_on
+
+    try:
+        while is_running and ui.running:
+            button_on = not button_is_off()
+
+            if button_on != last_armed:
+                if button_on:
+                    is_armed = True
+                    is_thinking = False
+                    is_speaking = False
+                    clear_mouth()
+                    ui.set("Awake", "Listening when you are…")
+                else:
+                    is_armed = False
+                    is_thinking = False
+                    is_speaking = False
+                    clear_mouth()
+                    ui.set("Sleeping", "Switch ON to wake")
+                last_armed = button_on
+
+            update_listen_led_state()
+
+            if not is_armed:
+                time.sleep(0.05)
+                continue
+
+            audio_path = record_audio(ui)
+            if audio_path is None:
+                is_thinking = False
+                continue
+
+            if button_is_off():
+                is_thinking = False
+                try:
+                    os.remove(audio_path)
+                except FileNotFoundError:
+                    pass
+                continue
+
+            is_thinking = True
+            user_text = transcribe_audio(ui, audio_path)
+
+            try:
+                os.remove(audio_path)
+            except FileNotFoundError:
+                pass
+
+            ui.set("You said:", user_text)
+
+            if not user_text or not user_text.strip():
+                is_thinking = False
+                time.sleep(0.4)
+                continue
+
+            norm = user_text.lower().strip()
+            norm = norm.translate(str.maketrans("", "", string.punctuation))
+            first = norm.split()[0] if norm.split() else ""
+
+            if first in {"quit", "exit", "stop"}:
+                ui.set("Stopping", "Goodbye")
+                is_running = False
+                is_armed = False
+                break
+
+            if not is_meaningful_text(user_text):
+                ui.set("Heard noise", "Ignoring…")
+                is_thinking = False
+                time.sleep(0.4)
+                continue
+
+            ui.set("Thinking…", "")
+            if button_is_off():
+                is_thinking = False
+                continue
+
+            try:
+                completion = client.chat.completions.create(
+                    model=CHAT_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a calm, expressive AI. "
+                                "Respond concisely in 1 sentence unless necessary. "
+                                "Do NOT start with greetings like 'Hello', 'Hi', or 'How can I help you today?'. "
+                                "Just answer the user's request directly. "
+                                "Also output emotion as one of: happy, sad, neutral, angry, surprised. "
+                                "Format: <text> [emotion: <label>]"
+                            ),
+                        },
+                        {"role": "user", "content": user_text},
+                    ],
+                )
+
+                response = completion.choices[0].message.content
+                global is_offline
+                is_offline = False
+
+            except APIConnectionError:
+                ui.set("No internet", "Chat failed (OpenAI unreachable)")
+                set_offline_visual()
+                is_thinking = False
+                continue
+
+            full_reply = response.strip()
+            match = re.search(r"\[emotion:\s*(\w+)\]", full_reply, re.IGNORECASE)
+            emotion = match.group(1).lower() if match else "neutral"
+            reply_text = re.sub(r"\[emotion:.*\]", "", full_reply).strip()
+
+            EMOTION_COLORS = {
+                "happy": (0, 255, 255),
+                "sad": (255, 0, 0),
+                "angry": (0, 255, 0),
+                "surprised": (255, 255, 0),
+                "neutral": (0, 255, 0),
+            }
+            color = EMOTION_COLORS.get(emotion, (0, 255, 0))
+
+            is_thinking = False
+            if button_is_off():
+                continue
+
+            ui.set("Bot:", reply_text)
+            speak_text(ui, reply_text, color=color)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        is_running = False
+        is_armed = False
+        try:
+            listen_led.value = False
+        except Exception:
+            pass
+        try:
+            clear_mouth()
+        except Exception:
+            pass
+        ui.stop()
+
+if __name__ == "__main__":
+    main()

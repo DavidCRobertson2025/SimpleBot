@@ -1,23 +1,32 @@
 [Unit]
-Description=SimpleBot E-Ink Workshop Coach
-After=network-online.target sound.target multi-user.target
+Description=SimpleBot Touchscreen Chatbot
+After=network-online.target sound.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=davidcr
 WorkingDirectory=/home/davidcr/SimpleBot
+EnvironmentFile=/home/davidcr/SimpleBot/.env
 
-# Make sure we see logs in journalctl
+# --- Force SDL/pygame to use the framebuffer (avoids EGL/XDG issues) ---
+Environment=SDL_VIDEODRIVER=fbcon
+Environment=SDL_FBDEV=/dev/fb0
+Environment=SDL_NOMOUSE=0
+
+# Optional: reduce SDL logging noise
+Environment=SDL_AUDIODRIVER=alsa
+
+ExecStart=/home/davidcr/SimpleBot/cb-env/bin/python /home/davidcr/SimpleBot/SimpleChatbot.py
+
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillSignal=SIGINT
+KillMode=mixed
+
 StandardOutput=journal
 StandardError=journal
-
-# Run the bot via the wrapper script
-ExecStart=/home/davidcr/SimpleBot/run_simplebot.sh
-
-# Restart if it crashes
-Restart=on-failure
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
