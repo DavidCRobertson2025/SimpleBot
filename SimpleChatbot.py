@@ -155,7 +155,6 @@ class TouchUI:
         clock = pygame.time.Clock()
         padding = 24
         line_gap = 12
-        print(">>> UI loop started")
 
         # Force an initial paint
         needs_redraw = True
@@ -223,7 +222,6 @@ class TouchUI:
                 dot_color = self.dim if dot_on else (60, 60, 60)
                 pygame.draw.circle(self.screen, dot_color, (self.w - 18, self.h - 18), 6)
 
-                print(">>> UI flip")
                 pygame.display.flip()
                 needs_redraw = False
 
@@ -556,8 +554,10 @@ def set_offline_visual():
 # ================================================================
 #  TTS + MOUTH
 # ================================================================
-def speak_text(ui: TouchUI, text: str, color=(0, 255, 0)):
+def speak_text(ui, text: str, color=(0, 255, 0)):
+    """Speak via TTS and animate mouth with amplitude levels."""
     global is_speaking, previous_audio_level, is_offline, is_armed
+
     is_speaking = True
 
     mp3_path = "speech_output.mp3"
@@ -565,6 +565,7 @@ def speak_text(ui: TouchUI, text: str, color=(0, 255, 0)):
 
     ui.set("Speaking", text)
 
+    # --- Generate TTS (OpenAI) ---
     try:
         with client.audio.speech.with_streaming_response.create(
             model=TTS_MODEL,
@@ -580,6 +581,7 @@ def speak_text(ui: TouchUI, text: str, color=(0, 255, 0)):
         is_speaking = False
         return
 
+    # --- Convert MP3 to mono WAV at 48kHz ---
     subprocess.run(
         ["ffmpeg", "-y", "-i", mp3_path, "-ac", "1", "-ar", "48000", wav_path],
         stdout=subprocess.DEVNULL,
@@ -589,14 +591,31 @@ def speak_text(ui: TouchUI, text: str, color=(0, 255, 0)):
     wave_file = wave.open(wav_path, "rb")
     audio_interface = pyaudio.PyAudio()
 
+    # --- Choose output device robustly ---
     _, output_index = find_audio_devices()
-    if output_index is None:
-        ui.set("No speaker found", "Check USB audio output")
-        is_speaking = False
-        wave_file.close()
-        audio_interface.terminate()
-        return
 
+    if output_index is None:
+        # Try PyAudio default output device
+        try:
+            default_info = audio_interface.get_default_output_device_info()
+            output_index = int(default_info["index"])
+            print(
+                f"⚠️ No specific speaker found; using PyAudio default output "
+                f"index={output_index} ({default_info.get('name', '')})"
+            )
+        except Exception as e:
+            print(f"❌ No default output device available. Skipping audio playback. ({e})")
+            clear_mouth()
+            is_speaking = False
+            wave_file.close()
+            audio_interface.terminate()
+            # Clean up files
+            for path in (mp3_path, wav_path):
+                if os.path.exists(path):
+                    os.remove(path)
+            return
+
+    # --- Open output stream ---
     output_stream = audio_interface.open(
         format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
         channels=wave_file.getnchannels(),
@@ -606,12 +625,13 @@ def speak_text(ui: TouchUI, text: str, color=(0, 255, 0)):
     )
 
     chunk_size = 512
-    audio_playback_delay = 0.07
+    audio_playback_delay = 0.07  # lip-sync correction
 
     data = wave_file.readframes(chunk_size)
     playback_start_time = time.time() + audio_playback_delay
 
     while data:
+        # Stop speech if button released mid-speech (push-to-talk behavior)
         if is_armed and button_is_off():
             break
 
@@ -636,16 +656,19 @@ def speak_text(ui: TouchUI, text: str, color=(0, 255, 0)):
         data = wave_file.readframes(chunk_size)
 
     clear_mouth()
+
     output_stream.stop_stream()
     output_stream.close()
     audio_interface.terminate()
     wave_file.close()
 
+    # --- Clean up temporary files ---
     for path in (mp3_path, wav_path):
         if os.path.exists(path):
             os.remove(path)
 
     is_speaking = False
+
 
 # ================================================================
 #  MAIN
@@ -676,88 +699,66 @@ def main():
         # Startup announcement (audio + neopixels only)
         speak_text(ui, "I'm ready. Press the button and ask me a question.", color=(0, 255, 0))
 
-        # Armed state
-        button_on = not button_is_off()
-        is_armed = button_on
-        last_armed = button_on
+        # --- Push-to-talk: armed ONLY while button is held down ---
+        ui.set("Idle", "Hold button to talk")
 
         try:
             while is_running and ui.running:
-                button_on = not button_is_off()
-
-                # Handle latch/unlatch
-                if button_on != last_armed:
-                    if button_on:
-                        is_armed = True
-                        is_thinking = False
-                        is_speaking = False
-                        clear_mouth()
-                        ui.post("Awake", "Listening when you are…")
-                    else:
-                        is_armed = False
-                        is_thinking = False
-                        is_speaking = False
-                        clear_mouth()
-                        ui.post("Sleeping", "Switch ON to wake")
-                    last_armed = button_on
+                # Button logic:
+                # listen_button.value == True  -> released (OFF)
+                # listen_button.value == False -> pressed (ON)
+                pressed = not button_is_off()   # True while held down
+                is_armed = pressed
 
                 update_listen_led_state()
 
-                if not is_armed:
-                    time.sleep(0.05)
+                # If not pressed, just idle and wait
+                if not pressed:
+                    is_thinking = False
+                    is_speaking = False
+                    time.sleep(0.02)
                     continue
 
-                # Record
+                # Pressed: listen for speech
+                ui.set("Listening", "Speak now…")
+
                 audio_path = record_audio(ui)
                 if audio_path is None:
                     is_thinking = False
+                    ui.set("Idle", "Hold button to talk")
                     continue
 
-                # If turned off mid-record, discard
+                # If released during recording, discard
                 if button_is_off():
                     is_thinking = False
                     try:
                         os.remove(audio_path)
                     except FileNotFoundError:
                         pass
+                    ui.set("Idle", "Hold button to talk")
                     continue
 
                 # Transcribe
                 is_thinking = True
                 user_text = transcribe_audio(ui, audio_path)
+                is_thinking = False
 
                 try:
                     os.remove(audio_path)
                 except FileNotFoundError:
                     pass
 
-                ui.post("You said:", user_text)
+                ui.set("You said:", user_text)
 
-                if not user_text or not user_text.strip():
-                    is_thinking = False
-                    time.sleep(0.4)
+                if not user_text or not is_meaningful_text(user_text):
+                    ui.set("Idle", "Hold button to talk")
+                    time.sleep(0.2)
                     continue
 
-                norm = user_text.lower().strip()
-                norm = norm.translate(str.maketrans("", "", string.punctuation))
-                first = norm.split()[0] if norm.split() else ""
-
-                if first in {"quit", "exit", "stop"}:
-                    ui.post("Stopping", "Goodbye")
-                    is_running = False
-                    is_armed = False
-                    break
-
-                if not is_meaningful_text(user_text):
-                    ui.post("Heard noise", "Ignoring…")
-                    is_thinking = False
-                    time.sleep(0.4)
-                    continue
-
-                # Chat completion
-                ui.post("Thinking…", "")
+                # Chat
+                ui.set("Thinking…", "")
                 if button_is_off():
-                    is_thinking = False
+                    ui.set("Idle", "Hold button to talk")
                     continue
 
                 try:
@@ -782,9 +783,8 @@ def main():
                     is_offline = False
 
                 except APIConnectionError:
-                    ui.post("No internet", "Chat failed (OpenAI unreachable)")
+                    ui.set("No internet", "Chat failed (OpenAI unreachable)")
                     set_offline_visual()
-                    is_thinking = False
                     continue
 
                 full_reply = response.strip()
@@ -801,12 +801,11 @@ def main():
                 }
                 color = EMOTION_COLORS.get(emotion, (0, 255, 0))
 
-                is_thinking = False
-                if button_is_off():
-                    continue
-
-                ui.post("Bot:", reply_text)
+                # Speak (if released during speaking, speak_text already handles stop)
+                ui.set("Bot:", reply_text)
                 speak_text(ui, reply_text, color=color)
+
+                ui.set("Idle", "Hold button to talk")
 
         except KeyboardInterrupt:
             pass
