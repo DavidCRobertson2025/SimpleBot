@@ -8,14 +8,12 @@ Type=simple
 User=davidcr
 WorkingDirectory=/home/davidcr/SimpleBot
 EnvironmentFile=/home/davidcr/SimpleBot/.env
-
 # --- Force SDL/pygame to use the framebuffer (avoids EGL/XDG issues) ---
-Environment=SDL_VIDEODRIVER=fbcon
-Environment=SDL_FBDEV=/dev/fb0
-Environment=SDL_NOMOUSE=0
+Environment=SIAPLy=:0
+Environment=XAUTHORITY=/home/davidcr/.Xauthority
 
 # Optional: reduce SDL logging noise
-Environment=SDL_AUDIODRIVER=alsa
+# Environment=SDL_AUDIODRIVER=alsa
 
 ExecStart=/home/davidcr/SimpleBot/cb-env/bin/python /home/davidcr/SimpleBot/SimpleChatbot.py
 
@@ -29,4 +27,4 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target

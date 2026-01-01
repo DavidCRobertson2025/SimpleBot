@@ -8,14 +8,26 @@ import re
 import string
 import math
 import struct
+import queue
 
 import pyaudio
 import digitalio
 from PIL import ImageFont  # (only used to measure fonts? Not needed now; kept minimal)
 
-import os
-os.environ.setdefault("SDL_VIDEODRIVER", "fbcon")
-os.environ.setdefault("SDL_FBDEV", "/dev/fb0")
+os.environ.setdefault("SDL_RENDER_DRIVER", "software")
+# os.environ.setdefault("SDL_VIDEODRIVER", "wayland")
+# os.environ.setdefault("SDL_FBDEV", "/dev/fb0")
+
+# Pick a video driver that matches the session we're actually running in.
+# - If DISPLAY is set, we are on X11 (LightDM/Xorg).
+# - If WAYLAND_DISPLAY is set, we are on Wayland.
+# - Otherwise, don't force anything (pygame will decide).
+if "DISPLAY" in os.environ and os.environ["DISPLAY"]:
+    os.environ.pop("SDL_VIDEODRIVER", None)  # let SDL use x11
+elif "WAYLAND_DISPLAY" in os.environ and os.environ["WAYLAND_DISPLAY"]:
+    os.environ["SDL_VIDEODRIVER"] = "wayland"
+else:
+    os.environ.pop("SDL_VIDEODRIVER", None)
 
 import pygame
 
@@ -47,9 +59,11 @@ VOICE_NAME = "echo"
 class TouchUI:
     """
     Full-screen status display for the DSI touchscreen.
-    Shows:
-      - a big status line
-      - a wrapped body text line(s)
+
+    IMPORTANT:
+      - Run ui.loop() on the MAIN THREAD.
+      - From background threads, call ui.post(status, body) to update text.
+      - Do NOT call any pygame display functions from background threads.
     """
     def __init__(self):
         self._lock = threading.Lock()
@@ -57,40 +71,50 @@ class TouchUI:
         self.body = ""
         self.running = True
 
-        # pygame needs a DISPLAY. Make sure you run from the desktop session
-        # (or have a framebuffer/SDL env configured).
-        pygame.init()
+        # Queue for cross-thread UI updates
+        self.msgq = queue.SimpleQueue()
 
-        # Make video init explicit (fbcon can be picky)
+        # Init pygame (video/display should be used on main thread; init here is OK
+        # as long as you construct TouchUI on the main thread too)
+        pygame.init()
         pygame.display.init()
         if not pygame.display.get_init():
-            raise RuntimeError("pygame display failed to initialize (check SDL_VIDEODRIVER/SDL_FBDEV)")
+            raise RuntimeError("pygame display failed to initialize")
 
-        # Create the screen first, then touch mouse/keyboard APIs
         self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-        pygame.mouse.set_visible(False)
-
         pygame.display.set_caption("SimpleChatbot")
+
+        # Hide mouse cursor (safe after display set_mode)
+        pygame.mouse.set_visible(False)
 
         self.w, self.h = self.screen.get_size()
 
         # Font sizes tuned for ~4.3" 480x800-ish screens
         self.font_status = pygame.font.SysFont(None, 54)
         self.font_body = pygame.font.SysFont(None, 40)
-        self.font_small = pygame.font.SysFont(None, 32)
+        self.font_small = pygame.font.SysFont(None, 28)
 
         self.bg = (0, 0, 0)
         self.fg = (255, 255, 255)
         self.dim = (180, 180, 180)
 
+        # Simple “alive” indicator
+        self._tick = 0
+
+    # ---- Thread-safe API for other threads ----
+    def post(self, status: str, body: str = ""):
+        """Queue a UI update from any thread."""
+        self.msgq.put(((status or "").strip(), (body or "").strip()))
+
     def set(self, status: str, body: str = ""):
-        with self._lock:
-            self.status = (status or "").strip()
-            self.body = (body or "").strip()
+        # Backwards-compatible alias
+        self.post(status, body)
 
     def stop(self):
+        """Request UI loop shutdown."""
         self.running = False
 
+    # ---- Internal helpers ----
     def _wrap_text(self, text, font, max_width):
         if not text:
             return []
@@ -109,56 +133,100 @@ class TouchUI:
             lines.append(cur)
         return lines
 
+    def _drain_messages(self):
+        """Apply all queued updates (called from main/UI thread)."""
+        updated = False
+        while True:
+            try:
+                status, body = self.msgq.get_nowait()
+            except Exception:
+                break
+            with self._lock:
+                self.status = status
+                self.body = body
+            updated = True
+        return updated
+
+    # ---- Main-thread loop ----
     def loop(self):
+        """
+        Run on the MAIN THREAD.
+        """
         clock = pygame.time.Clock()
         padding = 24
+        line_gap = 12
+        print(">>> UI loop started")
+
+        # Force an initial paint
+        needs_redraw = True
 
         while self.running:
+            # Handle events (main thread)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
                 elif event.type == pygame.KEYDOWN:
-                    # ESC quits UI (optional)
                     if event.key == pygame.K_ESCAPE:
                         self.running = False
 
-            with self._lock:
-                status = self.status
-                body = self.body
+            # Apply updates from worker threads
+            if self._drain_messages():
+                needs_redraw = True
 
-            self.screen.fill(self.bg)
+            # Redraw at 30fps, or only when needed (either is fine)
+            # We'll redraw every frame to keep it simple & responsive.
+            needs_redraw = True
 
-            max_w = self.w - 2 * padding
+            if needs_redraw:
+                with self._lock:
+                    status = self.status
+                    body = self.body
 
-            # Wrap body
-            body_lines = self._wrap_text(body, self.font_body, max_w)
+#                 self.screen.fill(self.bg)
+                # Debugging code to test color
+                self._tick = (self._tick + 1) % 60
+                bg = (255, 0, 0) if self._tick < 30 else (0, 0, 255)
+                self.screen.fill(bg)
 
-            # Render status (single line; if too long, fall back to smaller)
-            status_font = self.font_status if self.font_status.size(status)[0] <= max_w else self.font_body
-            status_surf = status_font.render(status, True, self.fg)
+                max_w = self.w - 2 * padding
 
-            # Compute vertical centering
-            line_gap = 12
-            body_surfs = [self.font_body.render(line, True, self.dim) for line in body_lines[:6]]
+                # Wrap body
+                body_lines = self._wrap_text(body, self.font_body, max_w)
 
-            total_h = status_surf.get_height()
-            if body_surfs:
-                total_h += line_gap + sum(s.get_height() for s in body_surfs) + line_gap * (len(body_surfs) - 1)
+                # Render status (single line; if too long, fall back to smaller)
+                status_font = self.font_status if self.font_status.size(status)[0] <= max_w else self.font_body
+                status_surf = status_font.render(status, True, self.fg)
 
-            y = (self.h - total_h) // 2
+                body_surfs = [self.font_body.render(line, True, self.dim) for line in body_lines[:6]]
 
-            # Draw status centered
-            x = (self.w - status_surf.get_width()) // 2
-            self.screen.blit(status_surf, (x, y))
-            y += status_surf.get_height() + line_gap
+                # Compute vertical centering
+                total_h = status_surf.get_height()
+                if body_surfs:
+                    total_h += line_gap + sum(s.get_height() for s in body_surfs) + line_gap * (len(body_surfs) - 1)
 
-            # Draw body lines centered
-            for s in body_surfs:
-                x = (self.w - s.get_width()) // 2
-                self.screen.blit(s, (x, y))
-                y += s.get_height() + line_gap
+                y = (self.h - total_h) // 2
 
-            pygame.display.flip()
+                # Draw status centered
+                x = (self.w - status_surf.get_width()) // 2
+                self.screen.blit(status_surf, (x, y))
+                y += status_surf.get_height() + line_gap
+
+                # Draw body lines centered
+                for s in body_surfs:
+                    x = (self.w - s.get_width()) // 2
+                    self.screen.blit(s, (x, y))
+                    y += s.get_height() + line_gap
+
+                # “Alive” dot in bottom-right (optional)
+                self._tick = (self._tick + 1) % 60
+                dot_on = self._tick < 30
+                dot_color = self.dim if dot_on else (60, 60, 60)
+                pygame.draw.circle(self.screen, dot_color, (self.w - 18, self.h - 18), 6)
+
+                print(">>> UI flip")
+                pygame.display.flip()
+                needs_redraw = False
+
             clock.tick(30)
 
         pygame.quit()
@@ -583,157 +651,177 @@ def speak_text(ui: TouchUI, text: str, color=(0, 255, 0)):
 #  MAIN
 # ================================================================
 def main():
-    global is_running, is_thinking, is_armed, is_speaking
+    """
+    IMPORTANT:
+      - TouchUI.loop() MUST run on the main thread (pygame display context).
+      - The chatbot logic runs in a worker thread and communicates via ui.post().
+    """
+    global is_running, is_thinking, is_armed, is_speaking, is_offline
 
     clear_mouth()
 
+    # Create UI on main thread
     ui = TouchUI()
-    ui_thread = threading.Thread(target=ui.loop, daemon=True)
-    ui_thread.start()
+    ui.post("Chatbot starting…", "")
 
-    ui.set("Chatbot starting…", "")
+    def bot_worker():
+        global is_running, is_thinking, is_armed, is_speaking, is_offline
 
-    time.sleep(0.5)
+        time.sleep(0.5)
 
-    # Start background threads
-    threading.Thread(target=led_blink_loop, daemon=True).start()
-    threading.Thread(target=idle_speech_loop, args=(ui,), daemon=True).start()
+        # Start background threads (safe: these don't call pygame)
+        threading.Thread(target=led_blink_loop, daemon=True).start()
+        threading.Thread(target=idle_speech_loop, args=(ui,), daemon=True).start()
 
-    # Startup announcement
-    speak_text(ui, "I'm ready. Press the button and ask me a question.", color=(0, 255, 0))
+        # Startup announcement (audio + neopixels only)
+        speak_text(ui, "I'm ready. Press the button and ask me a question.", color=(0, 255, 0))
 
-    # Armed state
-    button_on = not button_is_off()
-    is_armed = button_on
-    last_armed = button_on
+        # Armed state
+        button_on = not button_is_off()
+        is_armed = button_on
+        last_armed = button_on
 
-    try:
-        while is_running and ui.running:
-            button_on = not button_is_off()
+        try:
+            while is_running and ui.running:
+                button_on = not button_is_off()
 
-            if button_on != last_armed:
-                if button_on:
-                    is_armed = True
+                # Handle latch/unlatch
+                if button_on != last_armed:
+                    if button_on:
+                        is_armed = True
+                        is_thinking = False
+                        is_speaking = False
+                        clear_mouth()
+                        ui.post("Awake", "Listening when you are…")
+                    else:
+                        is_armed = False
+                        is_thinking = False
+                        is_speaking = False
+                        clear_mouth()
+                        ui.post("Sleeping", "Switch ON to wake")
+                    last_armed = button_on
+
+                update_listen_led_state()
+
+                if not is_armed:
+                    time.sleep(0.05)
+                    continue
+
+                # Record
+                audio_path = record_audio(ui)
+                if audio_path is None:
                     is_thinking = False
-                    is_speaking = False
-                    clear_mouth()
-                    ui.set("Awake", "Listening when you are…")
-                else:
-                    is_armed = False
+                    continue
+
+                # If turned off mid-record, discard
+                if button_is_off():
                     is_thinking = False
-                    is_speaking = False
-                    clear_mouth()
-                    ui.set("Sleeping", "Switch ON to wake")
-                last_armed = button_on
+                    try:
+                        os.remove(audio_path)
+                    except FileNotFoundError:
+                        pass
+                    continue
 
-            update_listen_led_state()
+                # Transcribe
+                is_thinking = True
+                user_text = transcribe_audio(ui, audio_path)
 
-            if not is_armed:
-                time.sleep(0.05)
-                continue
-
-            audio_path = record_audio(ui)
-            if audio_path is None:
-                is_thinking = False
-                continue
-
-            if button_is_off():
-                is_thinking = False
                 try:
                     os.remove(audio_path)
                 except FileNotFoundError:
                     pass
-                continue
 
-            is_thinking = True
-            user_text = transcribe_audio(ui, audio_path)
+                ui.post("You said:", user_text)
 
-            try:
-                os.remove(audio_path)
-            except FileNotFoundError:
-                pass
+                if not user_text or not user_text.strip():
+                    is_thinking = False
+                    time.sleep(0.4)
+                    continue
 
-            ui.set("You said:", user_text)
+                norm = user_text.lower().strip()
+                norm = norm.translate(str.maketrans("", "", string.punctuation))
+                first = norm.split()[0] if norm.split() else ""
 
-            if not user_text or not user_text.strip():
+                if first in {"quit", "exit", "stop"}:
+                    ui.post("Stopping", "Goodbye")
+                    is_running = False
+                    is_armed = False
+                    break
+
+                if not is_meaningful_text(user_text):
+                    ui.post("Heard noise", "Ignoring…")
+                    is_thinking = False
+                    time.sleep(0.4)
+                    continue
+
+                # Chat completion
+                ui.post("Thinking…", "")
+                if button_is_off():
+                    is_thinking = False
+                    continue
+
+                try:
+                    completion = client.chat.completions.create(
+                        model=CHAT_MODEL,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a calm, expressive AI. "
+                                    "Respond concisely in 1 sentence unless necessary. "
+                                    "Do NOT start with greetings like 'Hello', 'Hi', or 'How can I help you today?'. "
+                                    "Just answer the user's request directly. "
+                                    "Also output emotion as one of: happy, sad, neutral, angry, surprised. "
+                                    "Format: <text> [emotion: <label>]"
+                                ),
+                            },
+                            {"role": "user", "content": user_text},
+                        ],
+                    )
+                    response = completion.choices[0].message.content
+                    is_offline = False
+
+                except APIConnectionError:
+                    ui.post("No internet", "Chat failed (OpenAI unreachable)")
+                    set_offline_visual()
+                    is_thinking = False
+                    continue
+
+                full_reply = response.strip()
+                match = re.search(r"\[emotion:\s*(\w+)\]", full_reply, re.IGNORECASE)
+                emotion = match.group(1).lower() if match else "neutral"
+                reply_text = re.sub(r"\[emotion:.*\]", "", full_reply).strip()
+
+                EMOTION_COLORS = {
+                    "happy": (0, 255, 255),
+                    "sad": (255, 0, 0),
+                    "angry": (0, 255, 0),
+                    "surprised": (255, 255, 0),
+                    "neutral": (0, 255, 0),
+                }
+                color = EMOTION_COLORS.get(emotion, (0, 255, 0))
+
                 is_thinking = False
-                time.sleep(0.4)
-                continue
+                if button_is_off():
+                    continue
 
-            norm = user_text.lower().strip()
-            norm = norm.translate(str.maketrans("", "", string.punctuation))
-            first = norm.split()[0] if norm.split() else ""
+                ui.post("Bot:", reply_text)
+                speak_text(ui, reply_text, color=color)
 
-            if first in {"quit", "exit", "stop"}:
-                ui.set("Stopping", "Goodbye")
-                is_running = False
-                is_armed = False
-                break
+        except KeyboardInterrupt:
+            pass
+        finally:
+            # Signal UI to exit
+            ui.stop()
 
-            if not is_meaningful_text(user_text):
-                ui.set("Heard noise", "Ignoring…")
-                is_thinking = False
-                time.sleep(0.4)
-                continue
+    # Start chatbot logic in the background
+    threading.Thread(target=bot_worker, daemon=True).start()
 
-            ui.set("Thinking…", "")
-            if button_is_off():
-                is_thinking = False
-                continue
-
-            try:
-                completion = client.chat.completions.create(
-                    model=CHAT_MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a calm, expressive AI. "
-                                "Respond concisely in 1 sentence unless necessary. "
-                                "Do NOT start with greetings like 'Hello', 'Hi', or 'How can I help you today?'. "
-                                "Just answer the user's request directly. "
-                                "Also output emotion as one of: happy, sad, neutral, angry, surprised. "
-                                "Format: <text> [emotion: <label>]"
-                            ),
-                        },
-                        {"role": "user", "content": user_text},
-                    ],
-                )
-
-                response = completion.choices[0].message.content
-                global is_offline
-                is_offline = False
-
-            except APIConnectionError:
-                ui.set("No internet", "Chat failed (OpenAI unreachable)")
-                set_offline_visual()
-                is_thinking = False
-                continue
-
-            full_reply = response.strip()
-            match = re.search(r"\[emotion:\s*(\w+)\]", full_reply, re.IGNORECASE)
-            emotion = match.group(1).lower() if match else "neutral"
-            reply_text = re.sub(r"\[emotion:.*\]", "", full_reply).strip()
-
-            EMOTION_COLORS = {
-                "happy": (0, 255, 255),
-                "sad": (255, 0, 0),
-                "angry": (0, 255, 0),
-                "surprised": (255, 255, 0),
-                "neutral": (0, 255, 0),
-            }
-            color = EMOTION_COLORS.get(emotion, (0, 255, 0))
-
-            is_thinking = False
-            if button_is_off():
-                continue
-
-            ui.set("Bot:", reply_text)
-            speak_text(ui, reply_text, color=color)
-
-    except KeyboardInterrupt:
-        pass
+    try:
+        # Run UI loop on MAIN THREAD
+        ui.loop()
     finally:
+        # Cleanup (runs when UI exits)
         is_running = False
         is_armed = False
         try:
@@ -744,7 +832,8 @@ def main():
             clear_mouth()
         except Exception:
             pass
-        ui.stop()
+
 
 if __name__ == "__main__":
     main()
+
