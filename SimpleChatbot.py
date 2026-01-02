@@ -826,6 +826,7 @@ def main():
                 color = EMOTION_COLORS.get(emotion, (0, 255, 0))
 
                 # Speak (if released during speaking, speak_text already handles stop)
+                is_thinking = False
                 ui.set("Bot:", reply_text)
                 speak_text(ui, reply_text, color=color)
 
