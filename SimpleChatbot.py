@@ -31,10 +31,14 @@ else:
 
 import pygame
 
+import os
 from dotenv import load_dotenv
-load_dotenv()
 
 from openai import OpenAI, APIConnectionError
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
+client = OpenAI()
 
 import board
 
@@ -47,8 +51,6 @@ USE_PI5 = True
 # ================================================================
 #  OPENAI CONFIGURATION
 # ================================================================
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 CHAT_MODEL = "gpt-4.1-mini"
 TTS_MODEL = "gpt-4o-mini-tts"
 VOICE_NAME = "echo"
@@ -181,11 +183,11 @@ class TouchUI:
                     status = self.status
                     body = self.body
 
-#                 self.screen.fill(self.bg)
+                self.screen.fill(self.bg)
                 # Debugging code to test color
-                self._tick = (self._tick + 1) % 60
-                bg = (255, 0, 0) if self._tick < 30 else (0, 0, 255)
-                self.screen.fill(bg)
+                # self._tick = (self._tick + 1) % 60
+                # bg = (255, 0, 0) if self._tick < 30 else (0, 0, 255)
+                # self.screen.fill(bg)
 
                 max_w = self.w - 2 * padding
 
@@ -250,10 +252,23 @@ def find_audio_devices():
         info = p.get_device_info_by_index(i)
         name = info.get("name", "").lower()
 
+
+        # prefer known USB mic
+        if input_index is None and info.get("maxInputChannels") > 0:
+            if "USB PnP Audio Device" in name:
+                input_index = i
+
+        # fallback option
         if input_index is None and info.get("maxInputChannels") > 0:
             if "usb" in name or "mic" in name or "microphone" in name:
                 input_index = i
 
+        # prefer known USB speaker
+        if output_index is None and info.get("maxOutputChannels") > 0:
+            if "UACDemoV1.0" in name:
+                output_index = i
+
+        # Fallback option
         if output_index is None and info.get("maxOutputChannels") > 0:
             if "usb" in name or "audio" in name or "speaker" in name:
                 output_index = i
@@ -414,12 +429,17 @@ def curve_level(rms: float) -> float:
 # ================================================================
 def transcribe_audio(ui: TouchUI, filename: str) -> str:
     ui.set("Transcribing…", "")
+    print("[transcribing] opening file:", filename)
+
     try:
         with open(filename, "rb") as audio_file:
+            print("[transcribing] calling OpenAI Whisper...")
             result = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file
             )
+            print("[transcribe] OpenAI returned.")
+
         global is_offline
         is_offline = False
         return result.text.strip()
@@ -455,13 +475,16 @@ def is_meaningful_text(text: str) -> bool:
 def record_audio(
     ui: TouchUI,
     filename="input.wav",
-    threshold=0.055,            # RMS threshold (0..1)
-    silence_duration=0.6,
-    max_wait_for_speech=5.0,
-    max_record_seconds=12.0
+    max_record_seconds=12.0,
 ):
+    """
+    Push-to-talk recording:
+      - Start recording immediately (no RMS threshold gate)
+      - Keep recording while button is held
+      - Stop and save when button is released
+    """
     audio_interface = pyaudio.PyAudio()
-    RATE = 44100
+    RATE = 48000          # USB mic-friendly
     CHUNK = 1024
 
     input_index, _ = find_audio_devices()
@@ -469,58 +492,37 @@ def record_audio(
         ui.set("No microphone found", "Check USB mic")
         return None
 
-    stream = audio_interface.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=RATE,
-        input=True,
-        input_device_index=input_index,
-        frames_per_buffer=CHUNK
-    )
+    try:
+        stream = audio_interface.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=RATE,
+            input=True,
+            input_device_index=input_index,
+            frames_per_buffer=CHUNK
+        )
+    except Exception as e:
+        ui.set("Mic open failed", str(e))
+        audio_interface.terminate()
+        return None
 
-    ui.set("Listening", "Say something…")
+    ui.set("Listening", "Speak now…")
     frames = []
-    recording_started = False
-    silence_start = None
     start_time = time.time()
 
     try:
         while True:
+            # Stop when user releases the button
             if button_is_off():
-                ui.set("Button off", "Cancelling…")
                 break
 
-            if not recording_started and (time.time() - start_time) > max_wait_for_speech:
-                ui.set("No speech detected", "Timeout")
+            # Safety stop
+            if (time.time() - start_time) > max_record_seconds:
                 break
-
-            if recording_started and (time.time() - start_time) > max_record_seconds:
-                ui.set("Max recording length", "Stopping…")
-                break
-
-            update_listen_led_state()
 
             data = stream.read(CHUNK, exception_on_overflow=False)
-            rms = rms_from_int16_bytes(data)
-
-            if not recording_started:
-                if rms >= threshold:
-                    recording_started = True
-                    frames.append(data)
-                continue
-
             frames.append(data)
 
-            if rms < threshold:
-                if silence_start is None:
-                    silence_start = time.time()
-                elif time.time() - silence_start >= silence_duration:
-                    break
-            else:
-                silence_start = None
-
-    except KeyboardInterrupt:
-        pass
     finally:
         stream.stop_stream()
         stream.close()
@@ -531,7 +533,7 @@ def record_audio(
 
     with wave.open(filename, "wb") as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(audio_interface.get_sample_size(pyaudio.paInt16))
+        wf.setsampwidth(2)   # paInt16 = 2 bytes
         wf.setframerate(RATE)
         wf.writeframes(b"".join(frames))
 
@@ -617,11 +619,12 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
 
     # --- Open output stream ---
     output_stream = audio_interface.open(
-        format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
-        channels=wave_file.getnchannels(),
+        format=pyaudio.paInt16,
+        channels=1,
         rate=48000,
         output=True,
         output_device_index=output_index,
+        frames_per_buffer=1024,
     )
 
     chunk_size = 512
@@ -631,10 +634,6 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
     playback_start_time = time.time() + audio_playback_delay
 
     while data:
-        # Stop speech if button released mid-speech (push-to-talk behavior)
-        if is_armed and button_is_off():
-            break
-
         update_listen_led_state()
 
         rms = rms_from_int16_bytes(data)
@@ -728,20 +727,21 @@ def main():
                     ui.set("Idle", "Hold button to talk")
                     continue
 
-                # If released during recording, discard
-                if button_is_off():
-                    is_thinking = False
-                    try:
-                        os.remove(audio_path)
-                    except FileNotFoundError:
-                        pass
-                    ui.set("Idle", "Hold button to talk")
-                    continue
-
                 # Transcribe
                 is_thinking = True
-                user_text = transcribe_audio(ui, audio_path)
-                is_thinking = False
+                ui.set("Transcribing...", "")
+
+                try:
+                    t0 = time.time()
+                    user_text = transcribe_audio(ui, audio_path)
+                    print(f"[transcribe] done in {time.time() - t0:.2f}s: {user_text!r}")
+                    print(f"[post-transcribe] button_is_off={button_is_off()} pressed_snapshot={pressed} user_text_len={len(user_text)}")
+                except Exception as e:
+                    print ("[transcribe] ERROR:", repr(e))
+                    ui.set("Transcribe error", str(e))
+                    user_text = ""
+                finally:
+                    is_thinking = False
 
                 try:
                     os.remove(audio_path)
@@ -750,18 +750,19 @@ def main():
 
                 ui.set("You said:", user_text)
 
+                print(f"[meaningful] empty={not bool(user_text.strip())} meaningful={is_meaningful_text(user_text)} text={user_text!r}")
+
                 if not user_text or not is_meaningful_text(user_text):
                     ui.set("Idle", "Hold button to talk")
                     time.sleep(0.2)
                     continue
 
                 # Chat
-                ui.set("Thinking…", "")
-                if button_is_off():
-                    ui.set("Idle", "Hold button to talk")
-                    continue
+                ui.set("Thinking...", "")
+                print(f"[chat] sending to {CHAT_MODEL}: {user_text!r}")
 
                 try:
+                    t0 = time.time()
                     completion = client.chat.completions.create(
                         model=CHAT_MODEL,
                         messages=[
@@ -779,12 +780,19 @@ def main():
                             {"role": "user", "content": user_text},
                         ],
                     )
+                    dt = time.time() - t0
                     response = completion.choices[0].message.content
+                    print(f"[chat] got response in {dt:.2f}s: {response!r}")
                     is_offline = False
 
                 except APIConnectionError:
                     ui.set("No internet", "Chat failed (OpenAI unreachable)")
                     set_offline_visual()
+                    continue
+
+                except Exception as e:
+                    print("[chat] ERROR:", repr(e))
+                    ui.set("Chat error", str(e))
                     continue
 
                 full_reply = response.strip()
