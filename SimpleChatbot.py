@@ -148,6 +148,11 @@ class TouchUI:
                 self.body = body
             updated = True
         return updated
+    def post(self, status: str, body: str = ""):
+        self.msgq.put(((status or "").strip(), (body or "").strip()))
+
+    def set(self, status: str, body: str = ""):
+        self.post(status, body)
 
     # ---- Main-thread loop ----
     def loop(self):
@@ -169,6 +174,17 @@ class TouchUI:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         self.running = False
+
+            while not self.msgq.empty():
+                status, body = self.msgq.get_nowait()
+                with self._lock:
+                    self.status = status
+                    self.body = body
+            with self._lock:
+                status = self.status
+                body = self.body
+
+            self.screen.fill(self.bg)
 
             # Apply updates from worker threads
             if self._drain_messages():
