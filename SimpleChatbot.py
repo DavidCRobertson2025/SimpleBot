@@ -700,64 +700,29 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
     wave_file = wave.open(wav_path, "rb")
     audio_interface = pyaudio.PyAudio()
 
-    # --- Choose output device robustly ---
-    _, output_index = find_audio_devices()
-
-    if output_index is None:
-        # Try PyAudio default output device
-        try:
-            default_info = audio_interface.get_default_output_device_info()
-            output_index = int(default_info["index"])
-            print(
-                f"⚠️ No specific speaker found; using PyAudio default output "
-                f"index={output_index} ({default_info.get('name', '')})"
-            )
-        except Exception as e:
-            print(f"❌ No default output device available. Skipping audio playback. ({e})")
-            clear_mouth()
-            is_speaking = False
-            wave_file.close()
-            audio_interface.terminate()
-            # Clean up files
-            for path in (mp3_path, wav_path):
-                if os.path.exists(path):
-                    os.remove(path)
-            return
-
-    # --- Open output stream ---
-#    output_stream = audio_interface.open(
-    # --- Open output stream safely (some USB devices are mono-only) ---
-    try:
-        out_info = audio_interface.get_device_info_by_index(output_index)
-        max_out_ch = int(out_info.get("maxOutputChannels", 1)) or 1
-    except Exception:
-        max_out_ch = 1
-
-    # We force the WAV to mono above, so this should be 1
-    wav_ch = wave_file.getnchannels()
-    play_ch = 1 if max_out_ch >= 1 else 1  # always 1 for safety
-
+    # --- Open output stream using the system default output device ---
+    # IMPORTANT: This relies on ALSA default being configured (e.g., ~/.asoundrc)
+    # to point to the correct speaker (your USB speaker on card 2).
     try:
         output_stream = audio_interface.open(
             format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
-            channels=play_ch,
+            channels=wave_file.getnchannels(),
             rate=wave_file.getframerate(),
             output=True,
-            output_device_index=output_index,
+            output_device_index=None,  # None = use default output device
         )
     except Exception as e:
-        print(f"❌ Audio output open failed (device {output_index}): {e!r}")
-        # Fail-safe: don't crash the bot if audio can't play
+        print(f"❌ Audio output open failed (default device): {e!r}")
         clear_mouth()
         is_speaking = False
         wave_file.close()
         audio_interface.terminate()
+        # Clean up files
         for path in (mp3_path, wav_path):
             if os.path.exists(path):
                 os.remove(path)
         return
 
-#    )
 
     chunk_size = 512
     audio_playback_delay = 0.07  # lip-sync correction
