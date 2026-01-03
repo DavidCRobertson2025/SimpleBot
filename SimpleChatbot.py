@@ -692,7 +692,7 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
 
     # --- Convert MP3 to mono WAV at 48kHz ---
     subprocess.run(
-        ["ffmpeg", "-y", "-i", mp3_path, "-ac", "2", "-ar", "48000", wav_path],
+        ["ffmpeg", "-y", "-i", mp3_path, "-ac", "1", "-ar", "48000", wav_path],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
@@ -727,7 +727,7 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
     # --- Open output stream ---
     output_stream = audio_interface.open(
         format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
-        channels=wave_file.getnchannels(),
+        channels=1,
         rate=wave_file.getframerate(),
         output=True,
         output_device_index=output_index,
