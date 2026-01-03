@@ -316,7 +316,7 @@ previous_audio_level = 0.0
 #  NEOPIXEL MOUTH CONFIGURATION (Pi 4 / Pi 5)
 # ================================================================
 NEOPIXEL_PIN = board.D13
-NUM_PIXELS = 8
+NUM_PIXELS = 16
 
 LED_STATE = "idle"  # Idle is listening, thinking, or speaking
 
@@ -587,7 +587,7 @@ def record_audio(
       - Stop and save when button is released
     """
     audio_interface = pyaudio.PyAudio()
-    RATE = 48000          # USB mic-friendly
+    RATE = wave_file.getframerate()          # USB mic-friendly
     CHUNK = 1024
 
     input_index, _ = find_audio_devices()
