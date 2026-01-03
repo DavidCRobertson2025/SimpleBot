@@ -264,30 +264,37 @@ def find_audio_devices():
     input_index = None
     output_index = None
 
+    # Pass 1: collect candidates
+    inputs = []
+    outputs = []
     for i in range(p.get_device_count()):
         info = p.get_device_info_by_index(i)
-        name = info.get("name", "").lower()
+        name = (info.get("name", "") or "").lower()
 
-
-        # prefer known USB mic
-        if input_index is None and info.get("maxInputChannels") > 0:
-            if "USB PnP Audio Device" in name:
+        if input_index is None and info.get("maxInputChannels", 0) > 0:
+            if "usb pnp audio device" in name:
                 input_index = i
 
-        # fallback option
-        if input_index is None and info.get("maxInputChannels") > 0:
-            if "usb" in name or "mic" in name or "microphone" in name:
-                input_index = i
-
-        # prefer known USB speaker
-        if output_index is None and info.get("maxOutputChannels") > 0:
-            if "UACDemoV1.0" in name:
+        if output_index is None and info.get("maxOutputChannels", 0) > 0:
+            if "uacdemov1.0" in name:
                 output_index = i
 
-        # Fallback option
-        if output_index is None and info.get("maxOutputChannels") > 0:
-            if "usb" in name or "audio" in name or "speaker" in name:
-                output_index = i
+    try:
+        forced_in = os.getenv("AUDIO_INPUT_INDEX")
+        if forced_in is not None:
+            input_index = int(forced_in)
+    except ValueError:
+        pass
+
+    try:
+        forced_out = os.getenv("AUDIO_OUTPUT_INDEX")
+        if forced_out is not None:
+            output_index = int(forced_out)
+    except ValueError:
+        pass
+
+    print(f"[initializing] selected mic input_index={input_index}")
+    print(f"[initializing] selected speaker output_index={output_index}")
 
     p.terminate()
     return input_index, output_index
@@ -310,6 +317,8 @@ previous_audio_level = 0.0
 # ================================================================
 NEOPIXEL_PIN = board.D13
 NUM_PIXELS = 8
+
+LED_STATE = "idle"  # Idle is listening, thinking, or speaking
 
 if USE_PI5:
     import adafruit_pixelbuf
@@ -337,21 +346,59 @@ else:
         pixel_order=neopixel.GRB,
     )
 
-def show_mouth(amplitude, color=(255, 255, 255)):
+STATE_COLORS = {
+    "idle": (0, 0, 255),
+    "listening": (0, 255, 0),
+    "thinking": (255, 0, 0),
+}
+
+def set_led_state(state: str):
+    global LED_STATE
+    LED_STATE = state
+
+def fill_pixels(color, brightness=0.15):
+    r, g, b = color
+    r = int(r* brightness)
+    g = int(g * brightness)
+    b = int(b * brightness)
+    pixels.fill((r, g, b))
+    pixels.show()
+
+def led_state_loop():
+    global is_running, LED_STATE, is_speaking
+    while is_running:
+        if is_speaking:
+            time.sleep(0.05)
+            continue
+
+        if LED_STATE == "idle":
+            fill_pixels(STATE_COLORS["idle"], brightness=0.08)      # gentle blue
+        elif LED_STATE == "listening":
+            fill_pixels(STATE_COLORS["listening"], brightness=0.12) # green
+        elif LED_STATE == "thinking":
+            fill_pixels(STATE_COLORS["thinking"], brightness=0.12)  # red
+        else:
+            fill_pixels((0, 0, 0), brightness=0.0)
+
+        time.sleep(0.2)
+
+def show_mouth(amplitude, color=(0, 255, 0), min_brightness=0.05, max_brightness=0.6):
     amplitude = max(0.0, min(1.0, amplitude))
-    num_lit = int(round(amplitude * NUM_PIXELS))
+    brightness = min_brightness + (max_brightness - min_brightness) * amplitude
+#    num_lit = int(round(amplitude * NUM_PIXELS))
 
-    pixels.fill((0, 0, 0))
-    center_left = NUM_PIXELS // 2 - 1
-    center_right = NUM_PIXELS // 2
+    r, g, b = color
+    pixels.fill((int(r * brightness), int(g * brightness), int(b * brightness)))
+#    center_left = NUM_PIXELS // 2 - 1
+#    center_right = NUM_PIXELS // 2
 
-    for i in range(num_lit // 2):
-        left_pos = center_left - i
-        right_pos = center_right + i
-        if 0 <= left_pos < NUM_PIXELS:
-            pixels[left_pos] = color
-        if 0 <= right_pos < NUM_PIXELS:
-            pixels[right_pos] = color
+#    for i in range(num_lit // 2):
+#        left_pos = center_left - i
+#        right_pos = center_right + i
+#        if 0 <= left_pos < NUM_PIXELS:
+#            pixels[left_pos] = color
+#        if 0 <= right_pos < NUM_PIXELS:
+#            pixels[right_pos] = color
 
     pixels.show()
 
@@ -359,8 +406,7 @@ def clear_mouth():
     pixels.fill((0, 0, 0))
     pixels.show()
 
-# ================================================================
-#  LISTEN BUTTON + LED CONFIGURATION
+# ==============================================================#  LISTEN BUTTON + LED CONFIGURATION
 # ================================================================
 BUTTON_PIN = board.D22       # Physical pin 15
 LISTEN_LED_PIN = board.D23   # Physical pin 16
@@ -410,6 +456,7 @@ def idle_speech_loop(ui: TouchUI):
             continue
         if time.time() - last_spoke_time > IDLE_INTERVAL:
             phrase = random.choice(IDLE_PHRASES)
+            set_led_state("speaking")
             speak_text(ui, phrase, color=(0, 255, 0))
             last_spoke_time = time.time()
 
@@ -523,6 +570,8 @@ def record_audio(
         return None
 
     ui.set("Listening", "Speak now…")
+    set_led_state("listening")
+
     frames = []
     start_time = time.time()
 
@@ -576,6 +625,8 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
     """Speak via TTS and animate mouth with amplitude levels."""
     global is_speaking, previous_audio_level, is_offline, is_armed
 
+    set_led_state("speaking")
+
     is_speaking = True
 
     mp3_path = "speech_output.mp3"
@@ -601,7 +652,7 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
 
     # --- Convert MP3 to mono WAV at 48kHz ---
     subprocess.run(
-        ["ffmpeg", "-y", "-i", mp3_path, "-ac", "1", "-ar", "48000", wav_path],
+        ["ffmpeg", "-y", "-i", mp3_path, "-ac", "2", "-ar", "48000", wav_path],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
@@ -635,12 +686,11 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
 
     # --- Open output stream ---
     output_stream = audio_interface.open(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=48000,
+        format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
+        channels=wave_file.getnchannels(),
+        rate=wave_file.getframerate(),
         output=True,
         output_device_index=output_index,
-        frames_per_buffer=1024,
     )
 
     chunk_size = 512
@@ -682,6 +732,7 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
         if os.path.exists(path):
             os.remove(path)
 
+    set_led_state("idle")
     is_speaking = False
 
 
@@ -712,6 +763,7 @@ def main():
         threading.Thread(target=idle_speech_loop, args=(ui,), daemon=True).start()
 
         # Startup announcement (audio + neopixels only)
+        set_led_state("speaking")
         speak_text(ui, "I'm ready. Press the button and ask me a question.", color=(0, 255, 0))
 
         # --- Push-to-talk: armed ONLY while button is held down ---
@@ -746,6 +798,7 @@ def main():
                 # Transcribe
                 is_thinking = True
                 ui.set("Transcribing...", "")
+                set_led_state("thinking")
 
                 try:
                     t0 = time.time()
@@ -828,8 +881,10 @@ def main():
                 # Speak (if released during speaking, speak_text already handles stop)
                 is_thinking = False
                 ui.set("Bot:", reply_text)
-                speak_text(ui, reply_text, color=color)
+                set_led_state("speaking")
 
+                speak_text(ui, reply_text, color=color)
+                
                 ui.set("Idle", "Hold button to talk")
 
         except KeyboardInterrupt:
