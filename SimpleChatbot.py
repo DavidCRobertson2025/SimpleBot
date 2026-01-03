@@ -335,7 +335,7 @@ if USE_PI5:
         NEOPIXEL_PIN,
         NUM_PIXELS,
         auto_write=True,
-        byteorder="BRG",
+        byteorder="GRB",
     )
 else:
     import neopixel
@@ -364,23 +364,63 @@ def fill_pixels(color, brightness=0.15):
     pixels.fill((r, g, b))
     pixels.show()
 
+def breathe_color(color, t, min_b=0.03, max_b=0.15, period=3.0):
+    """
+    Smooth breathing brightness using a sine wave.
+    t = time.time()
+    """
+    phase = (t % period) / period
+    brightness = min_b + (max_b - min_b) * (0.5 - 0.5 * math.cos(2 * math.pi * phase))
+    r, g, b = color
+    pixels.fill((int(r * brightness), int(g * brightness), int(b * brightness)))
+    pixels.show()
+
+
+def chase_color(color, step, brightness=0.15):
+    """
+    Single-pixel chase around the ring.
+    """
+    pixels.fill((0, 0, 0))
+    r, g, b = color
+    pixels[step % NUM_PIXELS] = (
+        int(r * brightness),
+        int(g * brightness),
+        int(b * brightness),
+    )
+    pixels.show()
+
 def led_state_loop():
     global is_running, LED_STATE, is_speaking
+
+    chase_step = 0
+
     while is_running:
+        # Speaking overrides everything (audio-reactive)
         if is_speaking:
-            time.sleep(0.05)
+            time.sleep(0.02)
             continue
 
-        if LED_STATE == "idle":
-            fill_pixels(STATE_COLORS["idle"], brightness=0.08)      # gentle blue
-        elif LED_STATE == "listening":
-            fill_pixels(STATE_COLORS["listening"], brightness=0.12) # green
-        elif LED_STATE == "thinking":
-            fill_pixels(STATE_COLORS["thinking"], brightness=0.12)  # red
-        else:
-            fill_pixels((0, 0, 0), brightness=0.0)
+        now = time.time()
 
-        time.sleep(0.2)
+        if LED_STATE == "idle":
+            # faint blue breathing
+            breathe_color((0, 0, 255), now)
+
+        elif LED_STATE == "listening":
+            # faint green breathing
+            breathe_color((0, 255, 0), now)
+
+        elif LED_STATE == "thinking":
+            # red chase
+            chase_color((255, 0, 0), chase_step)
+            chase_step += 1
+
+        else:
+            pixels.fill((0, 0, 0))
+            pixels.show()
+
+        time.sleep(0.05)
+
 
 def show_mouth(amplitude, color=(0, 255, 0), min_brightness=0.05, max_brightness=0.6):
     amplitude = max(0.0, min(1.0, amplitude))
@@ -761,6 +801,7 @@ def main():
         # Start background threads (safe: these don't call pygame)
         threading.Thread(target=led_blink_loop, daemon=True).start()
         threading.Thread(target=idle_speech_loop, args=(ui,), daemon=True).start()
+        threading.Thread(target=led_state_loop, daemon=True).start()
 
         # Startup announcement (audio + neopixels only)
         set_led_state("speaking")
