@@ -259,6 +259,7 @@ IDLE_PHRASES = [
     "How can I help?",
 ]
 
+
 def find_audio_devices():
     p = pyaudio.PyAudio()
     input_index = None
@@ -298,6 +299,7 @@ def find_audio_devices():
 
     p.terminate()
     return input_index, output_index
+
 
 # ================================================================
 #  GLOBAL STATE FLAGS
@@ -587,7 +589,7 @@ def record_audio(
       - Stop and save when button is released
     """
     audio_interface = pyaudio.PyAudio()
-    RATE = wave_file.getframerate()          # USB mic-friendly
+    RATE = 48000          # USB mic-friendly
     CHUNK = 1024
 
     input_index, _ = find_audio_devices()
