@@ -705,26 +705,53 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
     # --- Open output stream using the system default output device ---
     # IMPORTANT: This relies on ALSA default being configured (e.g., ~/.asoundrc)
     # to point to the correct speaker (your USB speaker on card 2).
-    try:
-        output_stream = audio_interface.open(
-            format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
-            channels=wave_file.getnchannels(),
-            rate=wave_file.getframerate(),
-            output=True,
-            output_device_index=None,  # None = use default output device
-        )
-    except Exception as e:
-        print(f"❌ Audio output open failed (default device): {e!r}")
+    _, output_index = find_audio_devices()
+    if output_index is None:
+        print("❌ No output device selected.")
         clear_mouth()
         is_speaking = False
         wave_file.close()
         audio_interface.terminate()
-        # Clean up files
         for path in (mp3_path, wav_path):
             if os.path.exists(path):
                 os.remove(path)
         return
 
+    try:
+        out_info = audio_interface.get_device_info_by_index(output_index)
+        print(f"[audio] using output_index={output_index} name={out_info.get('name')} maxOut={out_info.get('maxOutputChannels')}")
+    except Exception:
+        print(f"[audio] using output_index={output_index} (no device info)")
+
+    # Try mono first; if device rejects it, retry stereo
+    try:
+        output_stream = audio_interface.open(
+            format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
+            channels=1,
+            rate=wave_file.getframerate(),
+            output=True,
+            output_device_index=output_index,
+        )
+    except Exception as e1:
+        print(f"⚠️ audio open (mono) failed: {e1!r} — trying stereo")
+        try:
+            output_stream = audio_interface.open(
+                format=audio_interface.get_format_from_width(wave_file.getsampwidth()),
+                channels=2,
+                rate=wave_file.getframerate(),
+                output=True,
+                output_device_index=output_index,
+            )
+        except Exception as e2:
+            print(f"❌ Audio output open failed (device {output_index}): {e2!r}")
+            clear_mouth()
+            is_speaking = False
+            wave_file.close()
+            audio_interface.terminate()
+            for path in (mp3_path, wav_path):
+                if os.path.exists(path):
+                    os.remove(path)
+            return
 
     chunk_size = 512
     audio_playback_delay = 0.07  # lip-sync correction
