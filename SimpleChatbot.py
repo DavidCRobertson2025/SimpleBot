@@ -48,6 +48,9 @@ import board
 # Set this True on Raspberry Pi 5. False for Pi 4.
 USE_PI5 = True
 
+AUDIO_INPUT_INDEX = None
+AUDIO_OUTPUT_INDEX = None
+
 # ================================================================
 #  OPENAI CONFIGURATION
 # ================================================================
@@ -259,46 +262,86 @@ IDLE_PHRASES = [
     "How can I help?",
 ]
 
-
 def find_audio_devices():
     p = pyaudio.PyAudio()
-    input_index = None
-    output_index = None
 
-    # Pass 1: collect candidates
     inputs = []
     outputs = []
+
     for i in range(p.get_device_count()):
         info = p.get_device_info_by_index(i)
-        name = (info.get("name", "") or "").lower()
+        name = (info.get("name", "") or "")
+        lname = name.lower()
+        in_ch = int(info.get("maxInputChannels", 0) or 0)
+        out_ch = int(info.get("maxOutputChannels", 0) or 0)
 
-        if input_index is None and info.get("maxInputChannels", 0) > 0:
-            if "usb pnp audio device" in name:
-                input_index = i
+        if in_ch > 0:
+            inputs.append((i, lname, name, info))
+        if out_ch > 0:
+            outputs.append((i, lname, name, info))
 
-        if output_index is None and info.get("maxOutputChannels", 0) > 0:
-            if "uacdemov1.0" in name:
+    # ---- Pick input (mic) ----
+    input_index = None
+    # Prefer known mic name, but ONLY among real input devices
+    for i, lname, name, info in inputs:
+        if "usb pnp audio device" in lname:
+            input_index = i
+            break
+    # Fallback: first available input
+    if input_index is None and inputs:
+        input_index = inputs[0][0]
+
+    # ---- Pick output (speaker) ----
+    output_index = None
+    # Prefer known USB speaker name, but ONLY among real output devices
+    # (your speaker device name might be "uacdemov1.0" or "usb audio")
+    for i, lname, name, info in outputs:
+        if "uacdemov1.0" in lname:
+            output_index = i
+            break
+    if output_index is None:
+        for i, lname, name, info in outputs:
+            if "usb" in lname and "pnp audio device" not in lname:
                 output_index = i
+                break
+    # Fallback: first available output
+    if output_index is None and outputs:
+        output_index = outputs[0][0]
 
-    try:
-        forced_in = os.getenv("AUDIO_INPUT_INDEX")
-        if forced_in is not None:
+    # Env var overrides (highest priority)
+    forced_in = os.getenv("AUDIO_INPUT_INDEX")
+    if forced_in:
+        try:
             input_index = int(forced_in)
-    except ValueError:
-        pass
+        except ValueError:
+            pass
 
-    try:
-        forced_out = os.getenv("AUDIO_OUTPUT_INDEX")
-        if forced_out is not None:
+    forced_out = os.getenv("AUDIO_OUTPUT_INDEX")
+    if forced_out:
+        try:
             output_index = int(forced_out)
-    except ValueError:
-        pass
+        except ValueError:
+            pass
 
-    print(f"[initializing] selected mic input_index={input_index}")
-    print(f"[initializing] selected speaker output_index={output_index}")
+    # Print chosen devices with capabilities (this prevents silent wrong picks)
+    try:
+        if input_index is not None:
+            di = p.get_device_info_by_index(input_index)
+            print(f"[initializing] selected mic input_index={input_index} name={di.get('name')} maxIn={di.get('maxInputChannels')} maxOut={di.get('maxOutputChannels')}")
+        else:
+            print("[initializing] selected mic input_index=None")
+        if output_index is not None:
+            do = p.get_device_info_by_index(output_index)
+            print(f"[initializing] selected speaker output_index={output_index} name={do.get('name')} maxOut={do.get('maxOutputChannels')} maxIn={do.get('maxInputChannels')}")
+        else:
+            print("[initializing] selected speaker output_index=None")
+    except Exception:
+        print(f"[initializing] selected mic input_index={input_index}")
+        print(f"[initializing] selected speaker output_index={output_index}")
 
     p.terminate()
     return input_index, output_index
+
 
 
 # ================================================================
@@ -592,7 +635,7 @@ def record_audio(
     RATE = 48000          # USB mic-friendly
     CHUNK = 1024
 
-    input_index, _ = find_audio_devices()
+    input_index = AUDIO_INPUT_INDEX
     if input_index is None:
         ui.set("No microphone found", "Check USB mic")
         return None
@@ -702,10 +745,11 @@ def speak_text(ui, text: str, color=(0, 255, 0)):
     wave_file = wave.open(wav_path, "rb")
     audio_interface = pyaudio.PyAudio()
 
+
     # --- Open output stream using the system default output device ---
     # IMPORTANT: This relies on ALSA default being configured (e.g., ~/.asoundrc)
     # to point to the correct speaker (your USB speaker on card 2).
-    _, output_index = find_audio_devices()
+    output_index = AUDIO_OUTPUT_INDEX
     if output_index is None:
         print("❌ No output device selected.")
         clear_mouth()
@@ -815,6 +859,8 @@ def main():
 
     def bot_worker():
         global is_running, is_thinking, is_armed, is_speaking, is_offline
+        global AUDIO_INPUT_INDEX, AUDIO_OUTPUT_INDEX
+        AUDIO_INPUT_INDEX, AUDIO_OUTPUT_INDEX = find_audio_devices()
 
         time.sleep(0.5)
 
